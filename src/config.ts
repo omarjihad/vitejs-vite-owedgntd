@@ -44,9 +44,9 @@ export const config = {
 
 /** مستويات اللعبة: كل TURNS_PER_LEVEL أسئلة ينزل الوقت 4 ثواني */
 export const LEVELS = [
-  { name: "المستوى السهل", seconds: 12 },
-  { name: "المستوى المتوسط", seconds: 8 },
-  { name: "المستوى الصعب", seconds: 4 },
+  { name: "المستوى السهل", seconds: 12, color: "#2ecc71" },
+  { name: "المستوى المتوسط", seconds: 8, color: "#f5a623" },
+  { name: "المستوى الصعب", seconds: 4, color: "#e8493f" },
 ] as const;
 
 export function levelForTurn(turnNumber: number) {

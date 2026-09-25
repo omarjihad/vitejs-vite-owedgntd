@@ -6,8 +6,14 @@ const fontsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 GlobalFonts.registerFromPath(path.join(fontsDir, "Cairo_500Medium.ttf"), "Cairo");
 GlobalFonts.registerFromPath(path.join(fontsDir, "Cairo_700Bold.ttf"), "Cairo");
 GlobalFonts.registerFromPath(path.join(fontsDir, "Cairo_900Black.ttf"), "Cairo");
+// خطوط احتياطية علمود الأسماء المزخرفة (𝐒𝐀𝐒𝐔𝐊𝐄، 𝙸𝙲 • 𝐷𝑒𝑚𝑜𝑛) والرموز والإيموجي
+GlobalFonts.registerFromPath(path.join(fontsDir, "NotoSans_700Bold.ttf"), "Noto Sans");
+GlobalFonts.registerFromPath(path.join(fontsDir, "NotoSansMath_400Regular.ttf"), "Noto Sans Math");
+GlobalFonts.registerFromPath(path.join(fontsDir, "NotoSansSymbols_700Bold.ttf"), "Noto Sans Symbols");
+GlobalFonts.registerFromPath(path.join(fontsDir, "NotoSansSymbols2_400Regular.ttf"), "Noto Sans Symbols 2");
+GlobalFonts.registerFromPath(path.join(fontsDir, "NotoEmoji_700Bold.ttf"), "Noto Emoji");
 
-export const FONT = "Cairo";
+export const FONT = `Cairo, "Noto Sans", "Noto Sans Math", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji"`;
 
 export const colors = {
   bg: "#161619",
@@ -21,13 +27,66 @@ export const colors = {
   gray: "#8c8c8c",
 };
 
-/** يشيل الرموز الي الخط ما يدعمها (إيموجي وزخارف) علمود ما تطلع مربعات */
+/**
+ * الحروف الي الخطوط المدمجة تدعمها: لاتيني، يوناني، كيريلي، عربي، علامات وترقيم،
+ * رموز وأشكال، الحروف المزخرفة (Math Alphanumerics)، رموز الخيمياء، والإيموجي.
+ * أي شي غيرها ينشال علمود ما يطلع مربع فارغ.
+ */
+const SUPPORTED =
+  /[ -ͯͰ-ӿ؀-ۿݐ-ݿࢠ-ࣿḀ-ỿ -⯿　-〿ﭐ-﷿︀-️ﹰ-﻿＀-￯\u{1D400}-\u{1D7FF}\u{1F000}-\u{1FAFF}]/u;
+
+/** الاسم الكامل كما هو، بس نشيل الرموز الي ما نكدر نرسمها */
 export function safeName(name: string): string {
-  const cleaned = name
-    .replace(/[^ -~ -ɏ؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/g, "")
+  const cleaned = [...name.normalize("NFC")]
+    .filter((ch) => SUPPORTED.test(ch))
+    .join("")
     .replace(/\s+/g, " ")
     .trim();
-  return cleaned || "لاعب";
+  // إذا الاسم كله رموز غير مدعومة، نحوله للحروف العادية المقابلة
+  return cleaned || name.normalize("NFKC").replace(/[^\p{L}\p{N}\s]/gu, "").trim() || "لاعب";
+}
+
+/** يصغر الخط لحد ما النص يوسع بالعرض، وإذا بعده طويل يقصه */
+export function fitName(
+  ctx: SKRSContext2D,
+  text: string,
+  maxWidth: number,
+  size: number,
+  minSize: number,
+  weight: 500 | 700 | 900 = 900,
+): string {
+  let s = size;
+  ctx.font = font(s, weight);
+  while (s > minSize && ctx.measureText(text).width > maxWidth) {
+    s -= 2;
+    ctx.font = font(s, weight);
+  }
+  return fitText(ctx, text, maxWidth);
+}
+
+/** لون شفاف من لون hex */
+export function alpha(hex: string, a: number): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16},${(n >> 8) & 0xff},${n & 0xff},${a})`;
+}
+
+/** اسم الكروب بشكل كبير وشفاف بالخلفية */
+export function watermark(ctx: SKRSContext2D, text: string, W: number, H: number, color = "#ffffff", opacity = 0.06) {
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(-Math.atan2(H, W) * 0.6);
+  // عرض النص المائل بحيث يبقى كامل داخل الصورة
+  const target = Math.min(W, H) * 0.95;
+  ctx.font = font(200, 900);
+  const w = ctx.measureText(text).width;
+  const size = Math.max(40, Math.min(260, (200 * target) / Math.max(1, w)));
+  ctx.font = font(size, 900);
+  ctx.fillStyle = alpha(color, opacity);
+  ctx.direction = "inherit";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
 }
 
 export function font(size: number, weight: 500 | 700 | 900 = 700): string {

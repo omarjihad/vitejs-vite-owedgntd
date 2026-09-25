@@ -197,6 +197,7 @@ export class Game {
     const image = renderLineup(
       order.map((p) => ({ name: p.name, avatar: p.avatar! })),
       levelForTurn(0).name,
+      levelForTurn(0).color,
     );
     const caption =
       "📋 <b>ترتيب اللاعبين</b>\n\n" +
@@ -243,6 +244,7 @@ export class Game {
       letter: shown,
       seconds: level.seconds,
       levelName: level.name,
+      accent: level.color,
       number: this.order.indexOf(player) + 1,
     });
 

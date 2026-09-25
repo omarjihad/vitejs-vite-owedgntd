@@ -1,6 +1,6 @@
 import { createCanvas, type Image } from "@napi-rs/canvas";
 import { config } from "../config.js";
-import { colors, drawAvatar, fitText, font, ring, roundRect, rtlText, safeName } from "./common.js";
+import { alpha, colors, drawAvatar, fitName, font, ring, roundRect, rtlText, safeName, watermark } from "./common.js";
 
 export interface LineupPlayer {
   name: string;
@@ -8,7 +8,7 @@ export interface LineupPlayer {
 }
 
 /** الصورة الأولى: ترتيب اللاعبين بعد التوزيع العشوائي */
-export function renderLineup(players: LineupPlayer[], levelName: string): Buffer {
+export function renderLineup(players: LineupPlayer[], levelName: string, accent: string = colors.red): Buffer {
   const W = 1280;
   const pad = 40;
   const gap = 24;
@@ -28,10 +28,11 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
   ctx.save();
   ctx.clip();
   const glow = ctx.createRadialGradient(W / 2, -40, 20, W / 2, -40, 620);
-  glow.addColorStop(0, "rgba(232,73,63,0.35)");
-  glow.addColorStop(1, "rgba(232,73,63,0)");
+  glow.addColorStop(0, alpha(accent, 0.35));
+  glow.addColorStop(1, alpha(accent, 0));
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, W, H);
+  watermark(ctx, config.brandName, W, H, "#ffffff", 0.05);
   ctx.restore();
   roundRect(ctx, 1, 1, W - 2, H - 2, 36);
   ctx.strokeStyle = colors.cardBorder;
@@ -45,7 +46,7 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
 
   // زر المستوى (يسار)
   roundRect(ctx, pad, 32, 290, 66, 20);
-  ctx.fillStyle = colors.red;
+  ctx.fillStyle = accent;
   ctx.fill();
   ctx.fillStyle = "#fff";
   ctx.font = font(28, 700);
@@ -74,11 +75,11 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
 
     roundRect(ctx, x, y, cardW, cardH, 24);
     const cg = ctx.createLinearGradient(x, y, x + cardW, y);
-    cg.addColorStop(0, first ? "#2a1f28" : "#20212a");
+    cg.addColorStop(0, first ? alpha(accent, 0.14) : "#20212a");
     cg.addColorStop(1, "#1b1c23");
     ctx.fillStyle = cg;
     ctx.fill();
-    ctx.strokeStyle = first ? colors.red : colors.cardBorder;
+    ctx.strokeStyle = first ? accent : colors.cardBorder;
     ctx.lineWidth = first ? 3 : 2;
     ctx.stroke();
 
@@ -86,12 +87,12 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
     const ax = x + 18 + r;
     const ay = y + cardH / 2;
     drawAvatar(ctx, p.avatar, ax, ay, r);
-    ring(ctx, ax, ay, r + 1, first ? colors.red : "#3a3c46", 3);
+    ring(ctx, ax, ay, r + 1, first ? accent : "#3a3c46", 3);
 
     // الرقم
     const bx = x + cardW - 18 - 52;
     roundRect(ctx, bx, ay - 24, 52, 48, 14);
-    ctx.fillStyle = first ? colors.red : "#2c2e37";
+    ctx.fillStyle = first ? accent : "#2c2e37";
     ctx.fill();
     ctx.fillStyle = "#fff";
     ctx.font = font(24, 700);
@@ -102,10 +103,9 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
 
     // الاسم
     ctx.fillStyle = colors.text;
-    ctx.font = font(28, 700);
     const nameX = ax + r + 18;
     const maxW = bx - nameX - 16;
-    const name = fitText(ctx, safeName(p.name), maxW);
+    const name = fitName(ctx, safeName(p.name), maxW, 28, 18, 700);
     ctx.direction = "inherit";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -113,7 +113,12 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
   });
 
   // التبويب السفلي
-  const tabW = 300;
+  const brand = config.brandName;
+  const latin = /^[\x20-\x7E]+$/.test(brand);
+  ctx.font = font(30, 900);
+  ctx.letterSpacing = latin ? "14px" : "0px"; // التباعد يخرب الحروف العربية المتصلة
+  const label = latin ? brand.toUpperCase() : brand;
+  const tabW = Math.min(W - 200, Math.max(300, ctx.measureText(label).width + 90));
   const tabH = 54;
   const tx = (W - tabW) / 2;
   const ty = H - tabH + 2;
@@ -123,11 +128,10 @@ export function renderLineup(players: LineupPlayer[], levelName: string): Buffer
   ctx.strokeStyle = colors.cardBorder;
   ctx.stroke();
   ctx.fillStyle = "#c9c9cf";
-  ctx.font = font(30, 900);
-  ctx.direction = "ltr";
+  ctx.direction = "inherit";
   ctx.textAlign = "center";
-  ctx.letterSpacing = "14px";
-  ctx.fillText(config.brandName.toUpperCase(), W / 2 + 7, ty + tabH / 2);
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, W / 2 + (latin ? 7 : 0), ty + tabH / 2);
   ctx.letterSpacing = "0px";
 
   return canvas.toBuffer("image/png");
