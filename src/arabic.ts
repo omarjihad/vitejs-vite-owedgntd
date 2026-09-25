@@ -1,7 +1,8 @@
 /** أدوات التعامل مع الحروف والكلمات العربية */
 
 const TASHKEEL = /[ؐ-ًؚ-ٰٟۖ-ۭـ]/g; // حركات + تطويل
-const ARABIC_WORD = /^[ء-ي]+$/;
+// الحروف العربية + الحروف الي يستخدمها العراقيين بالكتابة (چ گ ڤ پ ک ی)
+const ARABIC_WORD = /^[\u0621-\u064A\u067E\u0686\u06A4\u06A9\u06AF\u06CC]+$/;
 
 /** الحروف الي يختار منها البوت عشوائياً (استبعدنا الحروف النادرة ببداية الكلمات) */
 const START_LETTERS = [..."ابتثجحخدذرزسشصضطعغفقكلمنهوي"];
@@ -21,7 +22,17 @@ export function normalizeLetter(ch: string): string {
     case "ة":
       return "ه";
     case "ى":
+    case "ی":
       return "ي";
+    case "چ":
+      return "ج";
+    case "گ":
+    case "ک":
+      return "ك";
+    case "ڤ":
+      return "ف";
+    case "پ":
+      return "ب";
     default:
       return ch;
   }

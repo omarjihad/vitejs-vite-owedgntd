@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { config } from "./config.js";
+import { cleanWord, isArabicWord, normalizeWord } from "./arabic.js";
 import { words } from "./db.js";
 
 /**
@@ -14,9 +15,38 @@ import { words } from "./db.js";
  * 4) الذكاء الاصطناعي (Claude) — اختياري، بس إذا حطيت ANTHROPIC_API_KEY
  */
 
-const dictPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../assets/words/ar.txt.gz");
-const dictionary = new Set(zlib.gunzipSync(fs.readFileSync(dictPath)).toString("utf8").split("\n"));
-console.log(`✔ القاموس: ${dictionary.size} كلمة`);
+const wordsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../assets/words");
+const dictionary = new Set(
+  zlib.gunzipSync(fs.readFileSync(path.join(wordsDir, "ar.txt.gz"))).toString("utf8").split("\n"),
+);
+
+/**
+ * القوائم الإضافية بمجلد assets/words/extra (أسماء، حيوانات، كلمات عراقية...).
+ * ملفات نص عادية تكدر تعدلها وتضيف عليها: كلمات مفصولة بمسافات أو أسطر، والسطر الي يبدي بـ # ملاحظة.
+ */
+function loadExtraLists(): number {
+  const dir = path.join(wordsDir, "extra");
+  let added = 0;
+  for (const file of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+    if (!file.endsWith(".txt")) continue;
+    for (const line of fs.readFileSync(path.join(dir, file), "utf8").split("\n")) {
+      if (line.trim().startsWith("#")) continue;
+      for (const token of line.split(/\s+/)) {
+        const word = cleanWord(token);
+        if (!word || !isArabicWord(word)) continue;
+        const key = normalizeWord(word);
+        if (key.length < 2) continue;
+        if (!dictionary.has(key)) added++;
+        dictionary.add(key);
+        // الأسماء والكلمات بدون "ال" نضيفها وياها هم (مثلاً: زرافة ← الزرافة)
+        if (!key.startsWith("ال")) dictionary.add("ال" + key);
+      }
+    }
+  }
+  return added;
+}
+const extra = loadExtraLists();
+console.log(`✔ القاموس: ${dictionary.size} كلمة (${extra} كلمة جديدة من القوائم الإضافية)`);
 
 const memory = new Map<string, boolean>();
 const inflight = new Map<string, Promise<boolean>>();
