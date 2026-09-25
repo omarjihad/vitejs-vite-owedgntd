@@ -1,13 +1,22 @@
 import Anthropic from "@anthropic-ai/sdk";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import { config } from "./config.js";
 import { words } from "./db.js";
 
 /**
- * فحص الكلمات:
+ * فحص الكلمات (مجاني بالكامل بشكل افتراضي):
  * 1) ذاكرة مؤقتة داخل البرنامج (فورية)
- * 2) قاعدة MongoDB للكلمات الي انفحصت قبل (سريعة جداً)
- * 3) الذكاء الاصطناعي (Claude) للكلمات الجديدة، والنتيجة تنحفظ للمرات الجاية
+ * 2) قاعدة MongoDB: الكلمات الي ضافها أو حذفها المشرفين، ونتائج الذكاء الاصطناعي السابقة
+ * 3) القاموس العربي المدمج (~120 ألف كلمة، بدون إنترنت)
+ * 4) الذكاء الاصطناعي (Claude) — اختياري، بس إذا حطيت ANTHROPIC_API_KEY
  */
+
+const dictPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../assets/words/ar.txt.gz");
+const dictionary = new Set(zlib.gunzipSync(fs.readFileSync(dictPath)).toString("utf8").split("\n"));
+console.log(`✔ القاموس: ${dictionary.size} كلمة`);
 
 const memory = new Map<string, boolean>();
 const inflight = new Map<string, Promise<boolean>>();
@@ -86,10 +95,13 @@ async function lookup(key: string, original: string): Promise<boolean> {
     console.error("[DB] فشل قراءة الكلمة:", err);
   }
 
+  if (dictionary.has(key)) return true;
+  if (!config.aiEnabled) return false;
+
   const verdict = await askAi(original);
   if (verdict === null) {
     // ما قدرنا نتأكد: ما نخزن النتيجة، ونطبق السياسة المختارة
-    return config.aiEnabled ? config.aiFailOpen : true;
+    return config.aiFailOpen;
   }
   try {
     await words.updateOne(
@@ -116,4 +128,18 @@ export async function isValidWord(key: string, original: string): Promise<boolea
   const valid = await pending;
   remember(key, valid);
   return valid;
+}
+
+/** إضافة كلمة يدوياً (valid=true) أو منعها (valid=false) */
+export async function setWord(key: string, valid: boolean): Promise<void> {
+  await words.updateOne(
+    { _id: key },
+    { $set: { valid, source: "manual", createdAt: new Date() } },
+    { upsert: true },
+  );
+  remember(key, valid);
+}
+
+export function inDictionary(key: string): boolean {
+  return dictionary.has(key);
 }

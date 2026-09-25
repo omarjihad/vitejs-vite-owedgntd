@@ -1,5 +1,6 @@
 import { autoRetry } from "@grammyjs/auto-retry";
 import { Bot, GrammyError, HttpError } from "grammy";
+import http from "node:http";
 import { config } from "./config.js";
 import { closeDb, connectDb } from "./db.js";
 import { activeGames } from "./game.js";
@@ -8,8 +9,16 @@ import { registerHandlers } from "./handlers.js";
 async function main() {
   await connectDb();
   console.log("✔ اتصلت بقاعدة MongoDB");
-  if (!config.aiEnabled) {
-    console.warn("⚠ ANTHROPIC_API_KEY مو موجود: كل كلمة عربية سليمة الشكل راح تنقبل بدون فحص ذكي");
+  console.log(config.aiEnabled ? "✔ فحص الذكاء الاصطناعي مفعّل" : "✔ فحص الكلمات بالقاموس المدمج (مجاني)");
+
+  // خادم صغير علمود الاستضافات المجانية (Render) تعرف إن البوت شغال
+  if (config.port) {
+    http
+      .createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+      })
+      .listen(config.port, () => console.log(`✔ فحص الصحة على المنفذ ${config.port}`));
   }
 
   const bot = new Bot(config.botToken);

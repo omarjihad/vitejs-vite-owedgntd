@@ -17,9 +17,19 @@ export const config = {
   mongoDb: process.env.MONGODB_DB?.trim() || "tamreer",
 
   aiEnabled: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
-  aiModel: process.env.AI_MODEL?.trim() || "claude-opus-5",
+  aiModel: process.env.AI_MODEL?.trim() || "claude-haiku-4-5",
   aiFailOpen: (process.env.AI_FAIL_OPEN ?? "true").toLowerCase() !== "false",
   aiTimeoutMs: int("AI_TIMEOUT_MS", 6000),
+
+  /** أرقام حسابات مالكي البوت (يكدرون يضيفون ويحذفون كلمات) */
+  adminIds: new Set(
+    (process.env.BOT_ADMIN_IDS ?? "")
+      .split(",")
+      .map((s) => Number.parseInt(s.trim(), 10))
+      .filter(Number.isFinite),
+  ),
+  /** منفذ فحص الصحة للاستضافات المجانية مثل Render */
+  port: process.env.PORT ? int("PORT", 0) : null,
 
   brandName: process.env.BRAND_NAME?.trim() || "CLOVER",
 

@@ -1,7 +1,9 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { config, LEVELS } from "./config.js";
 import { users } from "./db.js";
+import { cleanWord, isArabicWord, normalizeWord } from "./arabic.js";
 import { activeGames, displayName, escapeHtml, Game, mention } from "./game.js";
+import { inDictionary, isValidWord, setWord } from "./validator.js";
 
 const ADMIN_RIGHTS = "delete_messages+pin_messages+invite_users+manage_chat";
 
@@ -18,14 +20,15 @@ function helpText(): string {
     "   (كل أشكال الهمزة تنحسب «أ»، والـ«ة» تنحسب «ه»، والـ«ى» تنحسب «ي»)\n" +
     `6️⃣ الوقت يبدأ ${LEVELS[0].seconds} ثانية، وكل ${config.turnsPerLevel} أسئلة يقل: ${times} ثانية.\n` +
     "7️⃣ الي يخلص وقته يطلع من اللعبة، وآخر لاعب يضل هو الفائز 🏆\n\n" +
-    "🤖 الكلمات تنفحص بالذكاء الاصطناعي، والكلمة ما تتكرر بنفس الجولة.\n" +
+    "📚 الكلمات تنفحص بقاموس عربي، والكلمة ما تتكرر بنفس الجولة.\n" +
     "👎 = كلمة غلط أو بحرف غلط (تكدر تحاول مرة ثانية ضمن الوقت)\n" +
     "🤔 = الكلمة مستخدمة قبل\n\n" +
     "<b>الأوامر:</b>\n" +
     "• <code>جولة</code> — بدء جولة جديدة\n" +
     "• <code>احصائياتي</code> — إحصائياتك\n" +
     "• <code>المتصدرين</code> — أفضل اللاعبين\n" +
-    "• <code>ايقاف</code> — إيقاف الجولة (لصاحبها أو المشرفين)"
+    "• <code>ايقاف</code> — إيقاف الجولة (لصاحبها أو المشرفين)\n" +
+    "• <code>افحص كلمة ...</code> — تشوف الكلمة مقبولة لو لا"
   );
 }
 
@@ -97,6 +100,38 @@ export function registerHandlers(bot: Bot) {
   bot.command("stats", async (ctx) => {
     if (!ctx.from) return;
     await ctx.reply(await statsText(ctx.from.id, displayName(ctx.from)), { parse_mode: "HTML" });
+  });
+
+  // ───────── إدارة الكلمات ─────────
+  bot.hears(/^(اضف|أضف|احذف|افحص) كلمة (\S+)$/, async (ctx) => {
+    if (!ctx.from || !ctx.chat) return;
+    const [, action, raw] = ctx.match;
+    const word = cleanWord(raw);
+    if (!isArabicWord(word)) return void (await ctx.reply("اكتب كلمة عربية وحدة بس."));
+    const key = normalizeWord(word);
+
+    if (action === "افحص") {
+      const game = activeGames.get(ctx.chat.id);
+      if (game && game.state !== "lobby" && game.state !== "ended") return; // ما نساعد أحد أثناء اللعب
+      const ok = await isValidWord(key, word);
+      await ctx.reply(ok ? `✅ «${escapeHtml(word)}» كلمة مقبولة` : `❌ «${escapeHtml(word)}» مو موجودة بالقاموس`, {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    if (!config.adminIds.has(ctx.from.id)) {
+      await ctx.reply("⛔ بس مالك البوت يكدر يعدل القاموس.");
+      return;
+    }
+    const valid = action !== "احذف";
+    await setWord(key, valid);
+    await ctx.reply(
+      valid
+        ? `✅ تمت إضافة «${escapeHtml(word)}» للقاموس`
+        : `🗑 «${escapeHtml(word)}» صارت ممنوعة${inDictionary(key) ? " (كانت بالقاموس المدمج)" : ""}`,
+      { parse_mode: "HTML" },
+    );
   });
 
   // ───────── المجموعات ─────────
