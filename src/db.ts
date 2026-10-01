@@ -40,6 +40,8 @@ export interface GameRecord {
   ownerId: number;
   players: number[];
   winnerId: number | null;
+  winnerIds?: number[];
+  mode?: "solo" | "team" | "duel";
   words: { userId: number; word: string; ms: number }[];
   startedAt: Date;
   endedAt: Date;

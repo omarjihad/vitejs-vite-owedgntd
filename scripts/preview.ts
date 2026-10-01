@@ -57,3 +57,19 @@ fs.writeFileSync(
   }),
 );
 console.log("✔ preview/stats.png");
+
+const { renderTeams, renderTeamWinner, TEAM_STYLE } = await import("../src/render/teams.js");
+const team = (t: 0 | 1, idx: number[]) => ({
+  name: TEAM_STYLE[t].name,
+  color: TEAM_STYLE[t].color,
+  players: idx.map((i) => ({ name: players[i].name, avatar: players[i].avatar, number: i + 1 })),
+});
+const t1 = team(0, [0, 2, 4, 6, 8]);
+const t2 = team(1, [1, 3, 5, 7]);
+fs.writeFileSync("preview/teams.png", renderTeams([t1, t2], LEVELS[0].name, LEVELS[0].color));
+fs.writeFileSync("preview/team-winner.png", renderTeamWinner(t2));
+fs.writeFileSync(
+  "preview/turn-team.png",
+  renderTurn({ ...players[1], letter: "ر", seconds: 12, levelName: LEVELS[0].name, accent: LEVELS[0].color, number: 2, team: { name: t2.name, color: t2.color } }),
+);
+console.log("✔ preview/teams.png");

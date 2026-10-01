@@ -11,6 +11,8 @@ export interface TurnInfo {
   /** لون المستوى: أخضر سهل، برتقالي متوسط، أحمر صعب */
   accent: string;
   number: number; // رقم اللاعب بالترتيب
+  /** بوضع الفرق: اسم ولون فريق اللاعب */
+  team?: { name: string; color: string };
 }
 
 function drawCross(ctx: SKRSContext2D, x: number, y: number, s: number) {
@@ -79,11 +81,26 @@ export function renderTurn(info: TurnInfo): Buffer {
   ctx.fillStyle = accent;
   ctx.font = font(26, 900);
   rtlText(ctx, info.levelName, S - 40, 46, "right");
-  ctx.fillStyle = "#9a9ca6";
-  ctx.font = font(26, 700);
-  ctx.direction = "ltr";
-  ctx.textAlign = "left";
-  ctx.fillText(`#${info.number}`, 40, 46);
+  if (info.team) {
+    // شارة الفريق بدل رقم اللاعب
+    ctx.font = font(24, 900);
+    const label = info.team.name;
+    const lw = ctx.measureText(label).width + 40;
+    roundRect(ctx, 30, 22, lw, 48, 24);
+    ctx.fillStyle = alpha(info.team.color, 0.22);
+    ctx.fill();
+    ctx.strokeStyle = info.team.color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = info.team.color;
+    rtlText(ctx, label, 30 + lw / 2, 47);
+  } else {
+    ctx.fillStyle = "#9a9ca6";
+    ctx.font = font(26, 700);
+    ctx.direction = "ltr";
+    ctx.textAlign = "left";
+    ctx.fillText(`#${info.number}`, 40, 46);
+  }
 
   // الصورة الشخصية
   const cx = S / 2;

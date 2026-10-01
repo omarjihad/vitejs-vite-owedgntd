@@ -1,4 +1,5 @@
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
+import type { User } from "grammy/types";
 import { config, LEVELS } from "./config.js";
 import { getAvatar } from "./avatar.js";
 import { users, type UserStats } from "./db.js";
@@ -28,7 +29,8 @@ function helpText(): string {
     "👎 = كلمة غلط أو بحرف غلط (تكدر تحاول مرة ثانية ضمن الوقت)\n" +
     "🤔 = الكلمة مستخدمة قبل\n\n" +
     "<b>الأوامر:</b>\n" +
-    "• <code>جولة</code> — بدء جولة جديدة\n" +
+    "• <code>جولة</code> — بدء جولة جديدة (فردي أو فرق)\n" +
+    "• <code>تحدي</code> — رد على رسالة شخص واكتبها علمود تتحداه 1 ضد 1\n" +
     "• <code>احصائياتي</code> — إحصائياتك\n" +
     "• <code>المتصدرين</code> — أفضل اللاعبين\n" +
     "• <code>الالقاب</code> — ألقابك وشلون تحصل الباقي\n" +
@@ -44,6 +46,54 @@ async function isChatAdmin(ctx: Context, userId: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ───────── التحدي 1 ضد 1 ─────────
+interface PendingChallenge {
+  challenger: { id: number; name: string };
+  challengerUser: User;
+  target: { id: number; name: string };
+  messageId: number;
+  timer: NodeJS.Timeout;
+}
+const pendingChallenges = new Map<number, PendingChallenge>();
+const CHALLENGE_TIMEOUT_MS = 60_000;
+
+async function handleChallenge(ctx: Context): Promise<void> {
+  const msg = ctx.msg!;
+  const chatId = ctx.chat!.id;
+  const from = ctx.from!;
+  const target = msg.reply_to_message?.from;
+  const reply = (text: string) =>
+    ctx.reply(text, { parse_mode: "HTML", reply_parameters: { message_id: msg.message_id } });
+
+  if (!target) return void (await reply("⚔️ علمود تتحدى شخص، رد على رسالته واكتب <b>تحدي</b>"));
+  if (target.is_bot) return void (await reply("🤖 ما تكدر تتحدى بوت"));
+  if (target.id === from.id) return void (await reply("😅 ما تكدر تتحدى نفسك"));
+  if (activeGames.has(chatId)) return void (await reply("⚠️ في جولة شغالة هسه، انتظروا لحد ما تخلص"));
+  if (pendingChallenges.has(chatId)) return void (await reply("⚔️ في تحدي ثاني دا ينتظر رد"));
+
+  const challenger = { id: from.id, name: displayName(from) };
+  const opponent = { id: target.id, name: displayName(target) };
+  const sent = await ctx.api.sendMessage(
+    chatId,
+    `⚔️ ${mention(opponent)}، هل أنت موافق على تحدي ${mention(challenger)}؟\n\n⏳ عندك دقيقة وحدة ترد`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("✅ موافق", "ch:yes").text("❌ رفض", "ch:no"),
+      link_preview_options: { is_disabled: true },
+    },
+  );
+  const timer = setTimeout(() => {
+    if (pendingChallenges.get(chatId)?.messageId !== sent.message_id) return;
+    pendingChallenges.delete(chatId);
+    ctx.api
+      .editMessageText(chatId, sent.message_id, `⌛ ${mention(opponent)} ما رد على تحدي ${mention(challenger)}`, {
+        parse_mode: "HTML",
+      })
+      .catch(() => {});
+  }, CHALLENGE_TIMEOUT_MS);
+  pendingChallenges.set(chatId, { challenger, challengerUser: from, target: opponent, messageId: sent.message_id, timer });
 }
 
 /** يدز بطاقة الإحصائيات كصورة */
@@ -225,12 +275,19 @@ export function registerHandlers(bot: Bot) {
           return;
         }
         const owner = { id: ctx.from.id, name: displayName(ctx.from) };
+        if (pendingChallenges.has(chatId)) {
+          await ctx.reply("⚔️ في تحدي دا ينتظر رد، انتظروا شوية.");
+          return;
+        }
         const g = new Game(ctx.api, chatId, owner);
         g.addPlayer(ctx.from);
         activeGames.set(chatId, g);
-        await g.sendLobby();
+        await g.sendModeChoice();
         return;
       }
+      case "تحدي":
+        await handleChallenge(ctx);
+        return;
       case "احصائياتي":
         await sendStats(ctx);
         return;
@@ -252,6 +309,55 @@ export function registerHandlers(bot: Bot) {
   });
 
   // ───────── الأزرار ─────────
+  // اختيار نوع الجولة (فردي / فرق)
+  bot.callbackQuery(/^g:mode:(solo|team)$/, async (ctx) => {
+    const game = ctx.chat ? activeGames.get(ctx.chat.id) : undefined;
+    if (!game || game.state !== "lobby" || game.mode || ctx.callbackQuery.message?.message_id !== game.lobbyMessageId)
+      return void (await ctx.answerCallbackQuery({ text: "هاي الرسالة منتهية ❌", show_alert: true }));
+    if (ctx.from.id !== game.owner.id)
+      return void (await ctx.answerCallbackQuery({ text: "بس صاحب الجولة يختار النوع ⛔", show_alert: true }));
+    const mode = ctx.match[1] as "solo" | "team";
+    await ctx.answerCallbackQuery({ text: mode === "team" ? "👥 وضع الفرق" : "👤 وضع فردي" });
+    await game.chooseMode(mode);
+  });
+
+  // ردود التحدي
+  bot.callbackQuery(/^ch:(yes|no)$/, async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const ch = chatId !== undefined ? pendingChallenges.get(chatId) : undefined;
+    if (!ch || ctx.callbackQuery.message?.message_id !== ch.messageId)
+      return void (await ctx.answerCallbackQuery({ text: "هذا التحدي منتهي ❌", show_alert: true }));
+    if (ctx.from.id !== ch.target.id)
+      return void (await ctx.answerCallbackQuery({ text: "التحدي مو إلك ✋", show_alert: true }));
+    clearTimeout(ch.timer);
+    pendingChallenges.delete(chatId!);
+
+    if (ctx.match[1] === "no") {
+      await ctx.answerCallbackQuery({ text: "رفضت التحدي" });
+      await ctx.api
+        .editMessageText(chatId!, ch.messageId, `🙅 ${mention(ch.target)} رفض تحدي ${mention(ch.challenger)}`, {
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
+      return;
+    }
+    if (activeGames.has(chatId!)) {
+      await ctx.answerCallbackQuery({ text: "في جولة شغالة هسه، جربوا بعدين", show_alert: true });
+      await ctx.api.editMessageText(chatId!, ch.messageId, "⚠️ انلغى التحدي لأن بدأت جولة ثانية.").catch(() => {});
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "⚔️ يلا نبدي!" });
+    const g = new Game(ctx.api, chatId!, { id: ch.challenger.id, name: ch.challenger.name }, "duel");
+    g.addPlayer(ch.challengerUser);
+    g.addPlayer(ctx.from);
+    g.lobbyMessageId = ch.messageId;
+    activeGames.set(chatId!, g);
+    void g.start().catch(async (e) => {
+      console.error("[Game] فشل بدء التحدي:", e);
+      await g.stop("البوت (صار خطأ)");
+    });
+  });
+
   // زر بطاقة التخطي
   bot.callbackQuery("g:skip", async (ctx) => {
     const game = ctx.chat ? activeGames.get(ctx.chat.id) : undefined;
@@ -293,9 +399,12 @@ export function registerHandlers(bot: Bot) {
       case "start": {
         if (!isOwner)
           return void (await ctx.answerCallbackQuery({ text: "هذا الزر لصاحب الجولة فقط ⛔", show_alert: true }));
-        if (game.players.size < config.minPlayers)
+        if (game.players.size < game.minPlayers())
           return void (await ctx.answerCallbackQuery({
-            text: `لازم ${config.minPlayers} لاعبين على الأقل 👥`,
+            text:
+              game.mode === "team"
+                ? `وضع الفرق يحتاج ${game.minPlayers()} لاعبين على الأقل 👥`
+                : `لازم ${game.minPlayers()} لاعبين على الأقل 👥`,
             show_alert: true,
           }));
         await ctx.answerCallbackQuery({ text: "يلا نبدي! 🚀" });

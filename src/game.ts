@@ -14,6 +14,7 @@ import { getAvatar } from "./avatar.js";
 import { config, levelForTurn } from "./config.js";
 import { games as gamesDb, users, type UserStats } from "./db.js";
 import { renderLineup } from "./render/lineup.js";
+import { renderTeams, renderTeamWinner, TEAM_STYLE, type TeamView } from "./render/teams.js";
 import { renderTurn } from "./render/turn.js";
 import { renderWinner } from "./render/winner.js";
 import { earnedTitles, titleLabel, type Title } from "./titles.js";
@@ -33,7 +34,13 @@ export interface Player {
   skipCard: boolean;
   skipsUsed: number;
   longestWord: string;
+  /** بوضع الفرق: 0 الفريق الأول، 1 الفريق الثاني */
+  team?: 0 | 1;
 }
+
+/** فردي، فرق، أو تحدي 1 ضد 1 */
+export type Mode = "solo" | "team" | "duel";
+export const TEAM_MIN_PLAYERS = 4;
 
 interface Turn {
   player: Player;
@@ -77,12 +84,48 @@ export class Game {
   private notes: string[] = [];
   private log: { userId: number; word: string; ms: number }[] = [];
   private startedAt = new Date();
+  /** null = صاحب الجولة بعده ما اختار النوع */
+  mode: Mode | null = null;
 
   constructor(
     private readonly api: Api,
     readonly chatId: number,
     readonly owner: { id: number; name: string },
-  ) {}
+    mode: Mode | null = null,
+  ) {
+    this.mode = mode;
+  }
+
+  minPlayers(): number {
+    return this.mode === "team" ? Math.max(TEAM_MIN_PLAYERS, config.minPlayers) : config.minPlayers;
+  }
+
+  // ───────────── اختيار نوع الجولة ─────────────
+
+  private modeChoiceText(): string {
+    return `🎮 ${mention(this.owner)} اختار نوع الجولة:\n\n👤 <b>فردي</b>: كل واحد يلعب لنفسه\n👥 <b>فرق</b>: فريقين، والبوت يوزعهم تلقائياً (أقل شي ${TEAM_MIN_PLAYERS} لاعبين)`;
+  }
+
+  private modeKeyboard(): InlineKeyboard {
+    return new InlineKeyboard().text("👤 فردي", "g:mode:solo").text("👥 فرق", "g:mode:team");
+  }
+
+  async sendModeChoice(): Promise<void> {
+    const msg = await this.api.sendMessage(this.chatId, this.modeChoiceText(), {
+      parse_mode: "HTML",
+      reply_markup: this.modeKeyboard(),
+      link_preview_options: { is_disabled: true },
+    });
+    this.lobbyMessageId = msg.message_id;
+    this.armLobbyTimeout();
+  }
+
+  /** صاحب الجولة اختار النوع: نحول نفس الرسالة لرسالة الانضمام */
+  async chooseMode(mode: "solo" | "team"): Promise<void> {
+    if (this.mode || this.state !== "lobby") return;
+    this.mode = mode;
+    await this.refreshLobby();
+  }
 
   // ───────────── مرحلة الانضمام ─────────────
 
@@ -111,11 +154,13 @@ export class Game {
 
   lobbyText(): string {
     const list = [...this.players.values()].map(mention).join(" | ") || "—";
+    const modeLine = this.mode === "team" ? "👥 النوع: <b>فرق</b> (البوت يوزع الفريقين تلقائياً)" : "👤 النوع: <b>فردي</b>";
     return (
-      `🎮 تم بدء جولة بواسطة ${mention(this.owner)}\n\n` +
+      `🎮 تم بدء جولة بواسطة ${mention(this.owner)}\n` +
+      `${modeLine}\n\n` +
       `👥 المشاركين: ${this.players.size}\n` +
       `${list}\n\n` +
-      `⚡ اضغط «انضمام» علمود تشارك (الحد الأدنى ${config.minPlayers} لاعبين)`
+      `⚡ اضغط «انضمام» علمود تشارك (الحد الأدنى ${this.minPlayers()} لاعبين)`
     );
   }
 
@@ -139,7 +184,7 @@ export class Game {
   }
 
   async refreshLobby(): Promise<void> {
-    if (!this.lobbyMessageId || this.state !== "lobby") return;
+    if (!this.lobbyMessageId || this.state !== "lobby" || !this.mode) return;
     await this.api
       .editMessageText(this.chatId, this.lobbyMessageId, this.lobbyText(), {
         parse_mode: "HTML",
@@ -151,7 +196,8 @@ export class Game {
 
   async repostLobby(): Promise<void> {
     const old = this.lobbyMessageId;
-    await this.sendLobby();
+    if (this.mode) await this.sendLobby();
+    else await this.sendModeChoice();
     if (old) await this.api.deleteMessage(this.chatId, old).catch(() => {});
   }
 
@@ -177,13 +223,11 @@ export class Game {
     this.startedAt = new Date();
 
     if (this.lobbyMessageId) {
-      await this.api
-        .editMessageText(
-          this.chatId,
-          this.lobbyMessageId,
-          `🎮 بدأت الجولة! عدد المشاركين: ${this.players.size}`,
-        )
-        .catch(() => {});
+      const started =
+        this.mode === "duel"
+          ? `⚔️ بدأ التحدي بين ${[...this.players.values()].map(mention).join(" و ")}!`
+          : `🎮 بدأت الجولة! عدد المشاركين: ${this.players.size}`;
+      await this.api.editMessageText(this.chatId, this.lobbyMessageId, started, { parse_mode: "HTML" }).catch(() => {});
     }
     const wait = await this.api.sendMessage(this.chatId, "⏳ يتم توزيع الأدوار، انتظر قليلاً...");
 
@@ -193,7 +237,21 @@ export class Game {
       const j = Math.floor(Math.random() * (i + 1));
       [order[i], order[j]] = [order[j], order[i]];
     }
-    this.order = order;
+    if (this.mode === "team") {
+      // نقسمهم فريقين بالتساوي، والأدوار بالتناوب: فريق أول، فريق ثاني، فريق أول...
+      const t0 = order.filter((_, i) => i % 2 === 0);
+      const t1 = order.filter((_, i) => i % 2 === 1);
+      t0.forEach((p) => (p.team = 0));
+      t1.forEach((p) => (p.team = 1));
+      const alt: Player[] = [];
+      for (let i = 0; i < Math.max(t0.length, t1.length); i++) {
+        if (t0[i]) alt.push(t0[i]);
+        if (t1[i]) alt.push(t1[i]);
+      }
+      this.order = alt;
+    } else {
+      this.order = order;
+    }
 
     await Promise.all(
       order.map(async (p) => {
@@ -202,15 +260,36 @@ export class Game {
     );
     if (this.isOver()) return;
 
-    const image = renderLineup(
-      order.map((p) => ({ name: p.name, avatar: p.avatar! })),
-      levelForTurn(0).name,
-      levelForTurn(0).color,
-    );
-    const caption =
-      "📋 <b>ترتيب اللاعبين</b>\n\n" +
-      order.map((p, i) => `${i + 1}. ${mention(p)}`).join("\n") +
-      "\n\n🔗 كمّل من آخر حرف بكلمة اللاعب الي قبلك!";
+    const lv = levelForTurn(0);
+    let image: Buffer;
+    let caption: string;
+    if (this.mode === "team") {
+      const views = this.teamViews();
+      image = renderTeams(views, lv.name, lv.color);
+      caption =
+        "📋 <b>توزيع الفرق</b>\n\n" +
+        ([0, 1] as const)
+          .map(
+            (t) =>
+              `${TEAM_STYLE[t].emoji} <b>${TEAM_STYLE[t].name}</b>\n` +
+              this.order
+                .map((p, i) => (p.team === t ? `${i + 1}. ${mention(p)}` : null))
+                .filter(Boolean)
+                .join("\n"),
+          )
+          .join("\n\n") +
+        "\n\n🔗 الأدوار بالتناوب بين الفريقين، والفريق الي يطلعون كل لاعبيه يخسر!";
+    } else {
+      image = renderLineup(
+        this.order.map((p) => ({ name: p.name, avatar: p.avatar! })),
+        lv.name,
+        lv.color,
+      );
+      caption =
+        (this.mode === "duel" ? "⚔️ <b>تحدي</b>\n\n" : "📋 <b>ترتيب اللاعبين</b>\n\n") +
+        this.order.map((p, i) => `${i + 1}. ${mention(p)}`).join("\n") +
+        "\n\n🔗 كمّل من آخر حرف بكلمة اللاعب الي قبلك!";
+    }
     await this.api.deleteMessage(this.chatId, wait.message_id).catch(() => {});
     await this.api.sendPhoto(this.chatId, new InputFile(image, "lineup.png"), {
       caption,
@@ -220,7 +299,18 @@ export class Game {
     this.state = "playing";
     await sleep(3000);
     if (this.isOver()) return;
-    await this.beginTurn(order[0], randomLetter());
+    await this.beginTurn(this.order[0], randomLetter());
+  }
+
+  private teamViews(alive = false): [TeamView, TeamView] {
+    return ([0, 1] as const).map((t) => ({
+      name: TEAM_STYLE[t].name,
+      color: TEAM_STYLE[t].color,
+      players: this.order
+        .map((p, i) => ({ p, number: i + 1 }))
+        .filter(({ p }) => p.team === t && (!alive || p.alive))
+        .map(({ p, number }) => ({ name: p.name, avatar: p.avatar!, number })),
+    })) as [TeamView, TeamView];
   }
 
   // ───────────── الأدوار ─────────────
@@ -235,6 +325,13 @@ export class Game {
 
   private nextAliveAfter(player: Player): Player {
     const idx = this.order.indexOf(player);
+    if (this.mode === "team") {
+      // الدور يروح للفريق الثاني إذا بيه أحد باقي
+      for (let step = 1; step <= this.order.length; step++) {
+        const p = this.order[(idx + step) % this.order.length];
+        if (p.alive && p.team !== player.team) return p;
+      }
+    }
     for (let step = 1; step <= this.order.length; step++) {
       const p = this.order[(idx + step) % this.order.length];
       if (p.alive) return p;
@@ -254,13 +351,16 @@ export class Game {
       levelName: level.name,
       accent: level.color,
       number: this.order.indexOf(player) + 1,
+      team: player.team !== undefined ? { name: TEAM_STYLE[player.team].name, color: TEAM_STYLE[player.team].color } : undefined,
     });
 
     const header = this.notes.length ? this.notes.join("\n") + "\n\n" : "";
     this.notes = [];
     const caption =
       header +
-      `🎯 دورك يا ${mention(player)}\n` +
+      `🎯 دورك يا ${mention(player)}` +
+      (player.team !== undefined ? ` (${TEAM_STYLE[player.team].emoji} ${TEAM_STYLE[player.team].name})` : "") +
+      "\n" +
       `🔤 اكتب كلمة تبدأ بحرف « <b>${shown}</b> »\n` +
       `⏱ عندك ${level.seconds} ثانية — ${level.name}\n` +
       (player.skipCard
@@ -408,8 +508,15 @@ export class Game {
     this.notes.push(`⏰ انتهى الوقت! تم إقصاء ${mention(p)}`);
 
     const alive = this.alivePlayers();
-    if (alive.length <= 1) {
-      await this.finish(alive[0] ?? null);
+    if (this.mode === "team") {
+      const left = new Set(alive.map((x) => x.team));
+      if (left.size <= 1) {
+        const team = alive[0]?.team;
+        await this.finish(team === undefined ? [] : this.order.filter((x) => x.team === team), team);
+        return;
+      }
+    } else if (alive.length <= 1) {
+      await this.finish(alive[0] ? [alive[0]] : []);
       return;
     }
     await this.beginTurn(this.nextAliveAfter(p), randomLetter());
@@ -417,14 +524,30 @@ export class Game {
 
   // ───────────── النهاية ─────────────
 
-  private async finish(winner: Player | null): Promise<void> {
+  private async finish(winners: Player[], team?: 0 | 1): Promise<void> {
     if (this.isOver()) return;
     this.dispose();
 
     const notes = this.notes.length ? this.notes.join("\n") + "\n\n" : "";
     this.notes = [];
+    const winner = winners.length === 1 && team === undefined ? winners[0] : null;
 
-    if (winner) {
+    if (team !== undefined && winners.length) {
+      const style = TEAM_STYLE[team];
+      const words = winners.reduce((a, p) => a + p.words, 0);
+      const mvp = [...winners].sort((a, b) => b.words - a.words)[0];
+      const caption =
+        notes +
+        `🏆 <b>فاز ${style.emoji} ${style.name}!</b>\n\n` +
+        winners.map((p) => `• ${mention(p)} — ${p.words} كلمة`).join("\n") +
+        `\n\n✍️ كلمات الفريق: ${words}\n` +
+        (mvp.words ? `⭐ نجم الفريق: ${mention(mvp)}\n` : "") +
+        `🔢 مجموع الكلمات بالجولة: ${this.log.length}`;
+      const image = renderTeamWinner(this.teamViews()[team]);
+      await this.api
+        .sendPhoto(this.chatId, new InputFile(image, "team-winner.png"), { caption, parse_mode: "HTML" })
+        .catch((e) => console.error("[Game] فشل إرسال صورة الفريق الفائز:", e));
+    } else if (winner) {
       const avg = winner.words ? (winner.totalMs / winner.words / 1000).toFixed(1) : "—";
       const fastest = winner.fastestMs !== null ? (winner.fastestMs / 1000).toFixed(1) : "—";
       const caption =
@@ -442,7 +565,7 @@ export class Game {
       await this.api.sendMessage(this.chatId, notes + "انتهت الجولة بدون فائز.", { parse_mode: "HTML" }).catch(() => {});
     }
 
-    const newTitles = await this.saveResults(winner).catch((e) => {
+    const newTitles = await this.saveResults(winners).catch((e) => {
       console.error("[DB] فشل حفظ النتائج:", e);
       return [] as { player: Player; titles: Title[] }[];
     });
@@ -464,7 +587,8 @@ export class Game {
   }
 
   /** يحفظ النتائج ويرجع الألقاب الجديدة لكل لاعب */
-  private async saveResults(winner: Player | null): Promise<{ player: Player; titles: Title[] }[]> {
+  private async saveResults(winners: Player[]): Promise<{ player: Player; titles: Title[] }[]> {
+    const winnerIds = new Set(winners.map((w) => w.id));
     const now = new Date();
     const ids = this.order.map((p) => p.id);
     const existing = new Map((await users.find({ _id: { $in: ids } }).toArray()).map((u) => [u._id, u]));
@@ -472,7 +596,7 @@ export class Game {
 
     const ops = this.order.map((p) => {
       const old: Partial<UserStats> = existing.get(p.id) ?? {};
-      const won = winner?.id === p.id;
+      const won = winnerIds.has(p.id);
       const winStreak = won ? (old.winStreak ?? 0) + 1 : 0;
       const longestLen = [...normalizeWord(p.longestWord)].length;
       const better = longestLen > (old.longestWordLen ?? 0);
@@ -528,7 +652,9 @@ export class Game {
       chatId: this.chatId,
       ownerId: this.owner.id,
       players: ids,
-      winnerId: winner?.id ?? null,
+      winnerId: winners.length === 1 ? winners[0].id : null,
+      winnerIds: [...winnerIds],
+      mode: this.mode ?? "solo",
       words: this.log,
       startedAt: this.startedAt,
       endedAt: now,
