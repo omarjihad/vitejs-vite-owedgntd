@@ -12,10 +12,11 @@ import {
 } from "./arabic.js";
 import { getAvatar } from "./avatar.js";
 import { config, levelForTurn } from "./config.js";
-import { games as gamesDb, users } from "./db.js";
+import { games as gamesDb, users, type UserStats } from "./db.js";
 import { renderLineup } from "./render/lineup.js";
 import { renderTurn } from "./render/turn.js";
 import { renderWinner } from "./render/winner.js";
+import { earnedTitles, titleLabel, type Title } from "./titles.js";
 import { isValidWord } from "./validator.js";
 
 export interface Player {
@@ -28,6 +29,10 @@ export interface Player {
   totalMs: number;
   fastestMs: number | null;
   eliminated: boolean;
+  /** بطاقة التخطي: وحدة لكل لاعب بالجولة */
+  skipCard: boolean;
+  skipsUsed: number;
+  longestWord: string;
 }
 
 interface Turn {
@@ -93,6 +98,9 @@ export class Game {
       totalMs: 0,
       fastestMs: null,
       eliminated: false,
+      skipCard: true,
+      skipsUsed: 0,
+      longestWord: "",
     });
     return "added";
   }
@@ -254,12 +262,16 @@ export class Game {
       header +
       `🎯 دورك يا ${mention(player)}\n` +
       `🔤 اكتب كلمة تبدأ بحرف « <b>${shown}</b> »\n` +
-      `⏱ عندك ${level.seconds} ثانية — ${level.name}`;
+      `⏱ عندك ${level.seconds} ثانية — ${level.name}\n` +
+      (player.skipCard
+        ? "🃏 عندك بطاقة تخطي وحدة (إذا خلص الوقت تنستخدم تلقائياً)"
+        : "⚠️ ما عندك بطاقة تخطي، إذا خلص الوقت تطلع");
 
     try {
       await this.api.sendPhoto(this.chatId, new InputFile(image, "turn.png"), {
         caption,
         parse_mode: "HTML",
+        reply_markup: player.skipCard ? new InlineKeyboard().text("🃏 تخطي", "g:skip") : undefined,
       });
     } catch (err) {
       console.error("[Game] فشل إرسال الدور:", err);
@@ -319,7 +331,7 @@ export class Game {
 
     if (!valid) {
       await this.react(messageId, "👎");
-      if (turn.expiredWhileChecking || Date.now() > turn.deadline) await this.eliminate(turn);
+      if (turn.expiredWhileChecking || Date.now() > turn.deadline) await this.expire(turn);
       return;
     }
 
@@ -331,6 +343,7 @@ export class Game {
     p.words++;
     p.totalMs += ms;
     p.fastestMs = p.fastestMs === null ? ms : Math.min(p.fastestMs, ms);
+    if ([...key].length > [...normalizeWord(p.longestWord)].length) p.longestWord = word;
     this.usedWords.add(key);
     this.log.push({ userId: p.id, word, ms });
     this.turnNumber++;
@@ -347,7 +360,41 @@ export class Game {
       turn.expiredWhileChecking = true;
       return;
     }
-    void this.eliminate(turn).catch((e) => console.error("[Game] خطأ بالإقصاء:", e));
+    void this.expire(turn).catch((e) => console.error("[Game] خطأ بانتهاء الوقت:", e));
+  }
+
+  /** انتهى الوقت: إذا عنده بطاقة تخطي تنستخدم تلقائياً، وإلا يطلع */
+  private async expire(turn: Turn): Promise<void> {
+    if (turn.player.skipCard) await this.skip(turn, true);
+    else await this.eliminate(turn);
+  }
+
+  /** اللاعب ضغط زر التخطي */
+  async useSkip(userId: number): Promise<string | null> {
+    const turn = this.turn;
+    if (this.state !== "playing" || !turn || turn.done) return "ماكو دور شغال هسه";
+    if (turn.player.id !== userId) return "مو دورك ✋";
+    if (!turn.player.skipCard) return "استخدمت بطاقتك من قبل 🃏";
+    if (turn.checking) return "انتظر، كلمتك دا تنفحص ⏳";
+    await this.skip(turn, false);
+    return null;
+  }
+
+  private async skip(turn: Turn, auto: boolean): Promise<void> {
+    if (turn.done) return;
+    turn.done = true;
+    clearTimeout(turn.timer);
+    const p = turn.player;
+    p.skipCard = false;
+    p.skipsUsed++;
+    this.turnNumber++;
+    this.notes.push(
+      auto
+        ? `⏰ خلص وقت ${mention(p)} — انستخدمت بطاقة التخطي تلقائياً 🃏`
+        : `🃏 ${mention(p)} استخدم بطاقة التخطي`,
+    );
+    // نفس الحرف ينتقل للاعب الي بعده
+    await this.beginTurn(this.nextAliveAfter(p), turn.letter);
   }
 
   private async eliminate(turn: Turn): Promise<void> {
@@ -395,40 +442,98 @@ export class Game {
       await this.api.sendMessage(this.chatId, notes + "انتهت الجولة بدون فائز.", { parse_mode: "HTML" }).catch(() => {});
     }
 
-    await this.saveResults(winner).catch((e) => console.error("[DB] فشل حفظ النتائج:", e));
+    const newTitles = await this.saveResults(winner).catch((e) => {
+      console.error("[DB] فشل حفظ النتائج:", e);
+      return [] as { player: Player; titles: Title[] }[];
+    });
+
+    // تهاني الألقاب الجديدة: رسالة وحدة بعد نهاية الجولة
+    if (newTitles.length) {
+      const lines = newTitles.map(
+        ({ player, titles }) =>
+          `🎉 تهانينا ${mention(player)}! حصلت على ${titles.length > 1 ? "الألقاب" : "لقب"} ${titles
+            .map((t) => `«${titleLabel(t)}»`)
+            .join(" و ")}`,
+      );
+      await this.api
+        .sendMessage(this.chatId, "🏅 <b>ألقاب جديدة</b>\n\n" + lines.join("\n") + "\n\nاكتب <b>الالقاب</b> علمود تشوف ألقابك", {
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
+    }
   }
 
-  private async saveResults(winner: Player | null): Promise<void> {
+  /** يحفظ النتائج ويرجع الألقاب الجديدة لكل لاعب */
+  private async saveResults(winner: Player | null): Promise<{ player: Player; titles: Title[] }[]> {
     const now = new Date();
-    await users.bulkWrite(
-      this.order.map((p) => ({
+    const ids = this.order.map((p) => p.id);
+    const existing = new Map((await users.find({ _id: { $in: ids } }).toArray()).map((u) => [u._id, u]));
+    const newTitles: { player: Player; titles: Title[] }[] = [];
+
+    const ops = this.order.map((p) => {
+      const old: Partial<UserStats> = existing.get(p.id) ?? {};
+      const won = winner?.id === p.id;
+      const winStreak = won ? (old.winStreak ?? 0) + 1 : 0;
+      const longestLen = [...normalizeWord(p.longestWord)].length;
+      const better = longestLen > (old.longestWordLen ?? 0);
+      const merged = {
+        gamesPlayed: (old.gamesPlayed ?? 0) + 1,
+        wins: (old.wins ?? 0) + (won ? 1 : 0),
+        words: (old.words ?? 0) + p.words,
+        fastestMs:
+          p.fastestMs === null ? old.fastestMs : Math.min(p.fastestMs, old.fastestMs ?? Number.POSITIVE_INFINITY),
+        bestWinStreak: Math.max(old.bestWinStreak ?? 0, winStreak),
+        longestWordLen: better ? longestLen : (old.longestWordLen ?? 0),
+        bestWordsInGame: Math.max(old.bestWordsInGame ?? 0, p.words),
+        flawlessWins: (old.flawlessWins ?? 0) + (won && p.skipsUsed === 0 ? 1 : 0),
+        bigWins: (old.bigWins ?? 0) + (won && this.order.length >= 8 ? 1 : 0),
+      };
+      const had = new Set(old.titles ?? []);
+      const fresh = earnedTitles(merged).filter((t) => !had.has(t.id));
+      if (fresh.length) newTitles.push({ player: p, titles: fresh });
+
+      return {
         updateOne: {
           filter: { _id: p.id },
           update: {
-            $set: { name: p.name, username: p.username, updatedAt: now },
+            $set: {
+              name: p.name,
+              username: p.username,
+              updatedAt: now,
+              winStreak,
+              bestWinStreak: merged.bestWinStreak,
+              bestWordsInGame: merged.bestWordsInGame,
+              ...(better ? { longestWord: p.longestWord, longestWordLen: longestLen } : {}),
+            },
             $setOnInsert: { createdAt: now },
             $inc: {
               gamesPlayed: 1,
-              wins: winner?.id === p.id ? 1 : 0,
+              wins: won ? 1 : 0,
               words: p.words,
               totalResponseMs: p.totalMs,
               eliminations: p.eliminated ? 1 : 0,
+              flawlessWins: won && p.skipsUsed === 0 ? 1 : 0,
+              bigWins: won && this.order.length >= 8 ? 1 : 0,
+              skipsUsed: p.skipsUsed,
             },
+            ...(fresh.length ? { $addToSet: { titles: { $each: fresh.map((t) => t.id) } } } : {}),
             ...(p.fastestMs !== null ? { $min: { fastestMs: p.fastestMs } } : {}),
           },
           upsert: true,
         },
-      })),
-    );
+      };
+    });
+    await users.bulkWrite(ops);
     await gamesDb.insertOne({
       chatId: this.chatId,
       ownerId: this.owner.id,
-      players: this.order.map((p) => p.id),
+      players: ids,
       winnerId: winner?.id ?? null,
       words: this.log,
       startedAt: this.startedAt,
       endedAt: now,
     });
+    return newTitles;
   }
 
   /** إيقاف الجولة يدوياً */

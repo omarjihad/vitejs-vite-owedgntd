@@ -11,6 +11,19 @@ export interface UserStats {
   totalResponseMs: number;
   fastestMs?: number;
   eliminations: number;
+  /** سلسلة الفوز الحالية وأفضل سلسلة */
+  winStreak?: number;
+  bestWinStreak?: number;
+  longestWord?: string;
+  longestWordLen?: number;
+  bestWordsInGame?: number;
+  /** فوز بدون استخدام بطاقة التخطي */
+  flawlessWins?: number;
+  /** فوز بجولة بيها 8 لاعبين أو أكثر */
+  bigWins?: number;
+  skipsUsed?: number;
+  /** الألقاب المحصلة */
+  titles?: string[];
   createdAt: Date;
   updatedAt: Date;
 }

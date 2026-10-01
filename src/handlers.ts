@@ -1,6 +1,9 @@
-import { Bot, InlineKeyboard, type Context } from "grammy";
+import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { config, LEVELS } from "./config.js";
-import { users } from "./db.js";
+import { getAvatar } from "./avatar.js";
+import { users, type UserStats } from "./db.js";
+import { renderStats } from "./render/stats.js";
+import { earnedTitles, hasTitle, mainTitle, titleLabel, TITLES } from "./titles.js";
 import { cleanWord, isArabicWord, normalizeWord } from "./arabic.js";
 import { activeGames, displayName, escapeHtml, Game, mention } from "./game.js";
 import { inDictionary, isValidWord, setWord } from "./validator.js";
@@ -19,7 +22,8 @@ function helpText(): string {
     "   مثال: رمل ← لؤلؤ ← أسد ...\n" +
     "   (كل أشكال الهمزة تنحسب «أ»، والـ«ة» تنحسب «ه»، والـ«ى» تنحسب «ي»)\n" +
     `6️⃣ الوقت يبدأ ${LEVELS[0].seconds} ثانية، وكل ${config.turnsPerLevel} أسئلة يقل: ${times} ثانية.\n` +
-    "7️⃣ الي يخلص وقته يطلع من اللعبة، وآخر لاعب يضل هو الفائز 🏆\n\n" +
+    "7️⃣ كل لاعب عنده <b>بطاقة تخطي</b> وحدة 🃏: يضغط زر «تخطي» ويعبر دوره للي بعده بنفس الحرف. وإذا خلص وقته وبعده عنده البطاقة تنستخدم تلقائياً.\n" +
+    "8️⃣ الي يخلص وقته وما عنده بطاقة يطلع، وآخر لاعب يضل هو الفائز 🏆\n\n" +
     "📚 الكلمات تنفحص بقاموس عربي، والكلمة ما تتكرر بنفس الجولة.\n" +
     "👎 = كلمة غلط أو بحرف غلط (تكدر تحاول مرة ثانية ضمن الوقت)\n" +
     "🤔 = الكلمة مستخدمة قبل\n\n" +
@@ -27,6 +31,7 @@ function helpText(): string {
     "• <code>جولة</code> — بدء جولة جديدة\n" +
     "• <code>احصائياتي</code> — إحصائياتك\n" +
     "• <code>المتصدرين</code> — أفضل اللاعبين\n" +
+    "• <code>الالقاب</code> — ألقابك وشلون تحصل الباقي\n" +
     "• <code>ايقاف</code> — إيقاف الجولة (لصاحبها أو المشرفين)\n" +
     "• <code>افحص كلمة ...</code> — تشوف الكلمة مقبولة لو لا"
   );
@@ -41,25 +46,71 @@ async function isChatAdmin(ctx: Context, userId: number): Promise<boolean> {
   }
 }
 
-async function statsText(userId: number, fallbackName: string): Promise<string> {
-  const s = await users.findOne({ _id: userId });
+/** يدز بطاقة الإحصائيات كصورة */
+async function sendStats(ctx: Context): Promise<void> {
+  const from = ctx.from!;
+  const replyTo = ctx.msg ? { reply_parameters: { message_id: ctx.msg.message_id } } : {};
+  const s = await users.findOne({ _id: from.id });
   if (!s || !s.gamesPlayed) {
-    return `📊 ${escapeHtml(fallbackName)}، بعدك ما لعبت ولا جولة! اكتب <b>جولة</b> بالمجموعة وابدي 🎮`;
+    await ctx.reply(`📊 ${escapeHtml(displayName(from))}، بعدك ما لعبت ولا جولة! اكتب <b>جولة</b> بالمجموعة وابدي 🎮`, {
+      parse_mode: "HTML",
+      ...replyTo,
+    });
+    return;
   }
+  const name = displayName(from);
   const rank = (await users.countDocuments({ wins: { $gt: s.wins } })) + 1;
   const winRate = Math.round((s.wins / s.gamesPlayed) * 100);
   const avg = s.words ? (s.totalResponseMs / s.words / 1000).toFixed(1) : "—";
   const fastest = s.fastestMs != null ? (s.fastestMs / 1000).toFixed(1) : "—";
-  return (
-    `📊 <b>إحصائيات</b> ${mention({ id: userId, name: s.name })}\n\n` +
-    `🎮 الجولات: <b>${s.gamesPlayed}</b>\n` +
-    `🏆 الفوز: <b>${s.wins}</b> (${winRate}%)\n` +
-    `✍️ الكلمات الصحيحة: <b>${s.words}</b>\n` +
-    `⚡ متوسط السرعة: <b>${avg}</b> ث\n` +
-    `🚀 أسرع إجابة: <b>${fastest}</b> ث\n` +
-    `💀 مرات الإقصاء: <b>${s.eliminations}</b>\n` +
-    `🥇 ترتيبك: <b>#${rank}</b>`
-  );
+  const earned = earnedTitles(s);
+  const main = mainTitle(s);
+
+  const image = renderStats({
+    name,
+    avatar: await getAvatar(ctx.api, from.id, name),
+    title: main ? titleLabel(main) : null,
+    titlesEarned: earned.length,
+    titlesTotal: TITLES.length,
+    rank,
+    tiles: [
+      { icon: "🎮", label: "الجولات", value: String(s.gamesPlayed), color: "#65aadd" },
+      { icon: "🏆", label: "الفوز", value: String(s.wins), color: "#c9922b" },
+      { icon: "📈", label: "نسبة الفوز", value: `${winRate}%`, color: "#2ecc71" },
+      { icon: "✍️", label: "الكلمات الصحيحة", value: String(s.words), color: "#a695e7" },
+      { icon: "⚡", label: "متوسط السرعة", value: `${avg} ث`, color: "#f5a623" },
+      { icon: "🚀", label: "أسرع إجابة", value: `${fastest} ث`, color: "#6ec9cb" },
+      { icon: "🔥", label: "أفضل سلسلة فوز", value: String(s.bestWinStreak ?? 0), color: "#ee7aae" },
+      { icon: "💀", label: "مرات الإقصاء", value: String(s.eliminations), color: "#e8493f" },
+    ],
+  });
+  const caption =
+    `📊 إحصائيات ${mention({ id: from.id, name })}` +
+    (s.longestWord ? `\n📏 أطول كلمة: <b>${escapeHtml(s.longestWord)}</b>` : "") +
+    "\n🏅 اكتب <b>الالقاب</b> علمود تشوف ألقابك";
+  await ctx.replyWithPhoto(new InputFile(image, "stats.png"), { caption, parse_mode: "HTML", ...replyTo });
+}
+
+/** قائمة الألقاب: المحصلة والباقية وشلون تحصلها */
+async function titlesText(userId: number, name: string): Promise<string> {
+  const s = (await users.findOne({ _id: userId })) ?? ({} as Partial<UserStats>);
+  const stats = s as UserStats;
+  const earned = TITLES.filter((t) => hasTitle(t, stats));
+  const locked = TITLES.filter((t) => !hasTitle(t, stats));
+  let text = `🏅 <b>ألقاب</b> ${mention({ id: userId, name })} (${earned.length}/${TITLES.length})\n`;
+  text += "\n✅ <b>المحصلة:</b>\n";
+  text += earned.length ? earned.map((t) => `${titleLabel(t)}`).join("\n") : "ولا لقب بعد، العب جولة وابدي 💪";
+  if (locked.length) {
+    text += "\n\n🔒 <b>الباقية:</b>\n";
+    text += locked
+      .map((t) => {
+        const [cur, target] = t.progress(stats);
+        const prog = target > 1 ? ` (${Math.min(cur, target)}/${target})` : "";
+        return `${titleLabel(t)} — ${t.how}${prog}`;
+      })
+      .join("\n");
+  }
+  return text;
 }
 
 async function leaderboardText(): Promise<string> {
@@ -99,7 +150,17 @@ export function registerHandlers(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!ctx.from) return;
-    await ctx.reply(await statsText(ctx.from.id, displayName(ctx.from)), { parse_mode: "HTML" });
+    await sendStats(ctx);
+  });
+
+  bot.hears(/^(الالقاب|الألقاب|القابي|ألقابي)$/, async (ctx) => {
+    if (!ctx.from) return;
+    const game = ctx.chat && activeGames.get(ctx.chat.id);
+    if (game?.isCurrentPlayer(ctx.from.id)) return; // دوره باللعب، نخليها تنحسب كلمة
+    await ctx.reply(await titlesText(ctx.from.id, displayName(ctx.from)), {
+      parse_mode: "HTML",
+      reply_parameters: { message_id: ctx.msg!.message_id },
+    });
   });
 
   // ───────── إدارة الكلمات ─────────
@@ -171,10 +232,7 @@ export function registerHandlers(bot: Bot) {
         return;
       }
       case "احصائياتي":
-        await ctx.reply(await statsText(ctx.from.id, displayName(ctx.from)), {
-          parse_mode: "HTML",
-          reply_parameters: { message_id: ctx.msg.message_id },
-        });
+        await sendStats(ctx);
         return;
       case "المتصدرين":
         await ctx.reply(await leaderboardText(), { parse_mode: "HTML" });
@@ -194,6 +252,14 @@ export function registerHandlers(bot: Bot) {
   });
 
   // ───────── الأزرار ─────────
+  // زر بطاقة التخطي
+  bot.callbackQuery("g:skip", async (ctx) => {
+    const game = ctx.chat ? activeGames.get(ctx.chat.id) : undefined;
+    if (!game) return void (await ctx.answerCallbackQuery({ text: "ماكو جولة شغالة", show_alert: true }));
+    const error = await game.useSkip(ctx.from.id);
+    await ctx.answerCallbackQuery(error ? { text: error, show_alert: true } : { text: "تم استخدام بطاقة التخطي 🃏" });
+  });
+
   bot.callbackQuery(/^g:(join|leave|start|repost)$/, async (ctx) => {
     const action = ctx.match[1];
     const chatId = ctx.chat?.id;

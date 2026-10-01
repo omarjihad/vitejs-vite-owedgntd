@@ -33,3 +33,27 @@ LEVELS.forEach((lv, i) =>
 );
 fs.writeFileSync("preview/winner.png", renderWinner(players[2].name, players[2].avatar));
 console.log("✔ preview/");
+
+const { renderStats } = await import("../src/render/stats.js");
+fs.writeFileSync(
+  "preview/stats.png",
+  renderStats({
+    name: players[1].name,
+    avatar: players[1].avatar,
+    title: "🥇 البطل",
+    titlesEarned: 6,
+    titlesTotal: 15,
+    rank: 3,
+    tiles: [
+      { icon: "🎮", label: "الجولات", value: "42", color: "#65aadd" },
+      { icon: "🏆", label: "الفوز", value: "12", color: "#c9922b" },
+      { icon: "📈", label: "نسبة الفوز", value: "29%", color: "#2ecc71" },
+      { icon: "✍️", label: "الكلمات الصحيحة", value: "318", color: "#a695e7" },
+      { icon: "⚡", label: "متوسط السرعة", value: "3.4 ث", color: "#f5a623" },
+      { icon: "🚀", label: "أسرع إجابة", value: "0.9 ث", color: "#6ec9cb" },
+      { icon: "🔥", label: "أفضل سلسلة فوز", value: "3", color: "#ee7aae" },
+      { icon: "💀", label: "مرات الإقصاء", value: "30", color: "#e8493f" },
+    ],
+  }),
+);
+console.log("✔ preview/stats.png");
