@@ -1,4 +1,4 @@
-import { createCanvas, type Image } from "@napi-rs/canvas";
+import { createCanvas, type Image, type SKRSContext2D } from "@napi-rs/canvas";
 import { config } from "../config.js";
 import { alpha, colors, drawAvatar, fitName, font, ring, roundRect, rtlText, safeName, watermark } from "./common.js";
 
@@ -145,35 +145,52 @@ export function renderTeams(teams: [TeamView, TeamView], levelName: string, acce
   return canvas.toBuffer("image/png");
 }
 
-/** صورة الفريق الفائز: كل أعضاءه بصورهم */
-export function renderTeamWinner(team: TeamView): Buffer {
+function drawStar(ctx: SKRSContext2D, cx: number, cy: number, outer: number, inner: number) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? outer : inner;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+/** صورة الفريق الفائز: نجم الفريق كبير بالنص مع نجمة، والباقين تحته */
+export function renderTeamWinner(team: TeamView, mvpIndex = -1): Buffer {
   const W = 1200;
-  const n = team.players.length;
-  const perRow = n <= 4 ? n : Math.ceil(n / 2);
-  const rows = Math.ceil(n / perRow);
-  const r = n <= 2 ? 150 : n <= 4 ? 115 : 90;
-  const cellW = Math.min(300, (W - 100) / perRow);
-  const cellH = r * 2 + 110;
-  const top = 260;
-  const H = top + rows * cellH + 140;
+  const mvp = mvpIndex >= 0 ? team.players[mvpIndex] : null;
+  const others = team.players.filter((_, i) => i !== mvpIndex);
+  const perRow = Math.min(5, Math.max(1, others.length));
+  const rows = Math.ceil(others.length / perRow);
+  const r = mvp ? 72 : others.length <= 2 ? 140 : others.length <= 4 ? 110 : 88;
+  const cellW = Math.min(mvp ? 220 : 300, (W - 100) / perRow);
+  const cellH = r * 2 + 95;
+  const mvpR = 150;
+  const top = 250;
+  const mvpBlock = mvp ? mvpR * 2 + 170 : 0;
+  const H = top + mvpBlock + rows * cellH + 120;
 
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#0e0e10";
   ctx.fillRect(0, 0, W, H);
 
-  // أشعة ذهبية خفيفة من فوق
+  // أشعة خفيفة من مكان النجم
+  const rayY = mvp ? top + mvpR + 20 : 120;
   ctx.save();
-  ctx.translate(W / 2, 120);
+  ctx.translate(W / 2, rayY);
   for (let i = 0; i < 36; i++) {
     ctx.rotate((Math.PI * 2) / 36);
     ctx.beginPath();
     ctx.moveTo(60, -6);
-    ctx.lineTo(900, -26);
-    ctx.lineTo(900, 26);
+    ctx.lineTo(1000, -30);
+    ctx.lineTo(1000, 30);
     ctx.lineTo(60, 6);
     ctx.closePath();
-    ctx.fillStyle = i % 2 ? alpha(colors.gold, 0.08) : alpha(team.color, 0.07);
+    ctx.fillStyle = i % 2 ? alpha(colors.gold, 0.09) : alpha(team.color, 0.07);
     ctx.fill();
   }
   ctx.restore();
@@ -182,9 +199,9 @@ export function renderTeamWinner(team: TeamView): Buffer {
   // العنوان
   ctx.fillStyle = colors.gold;
   ctx.font = font(40, 900);
-  rtlText(ctx, "🏆 الفريق الفائز", W / 2, 80);
+  rtlText(ctx, "🏆 الفريق الفائز", W / 2, 75);
   const tw = 520;
-  roundRect(ctx, (W - tw) / 2, 125, tw, 86, 43);
+  roundRect(ctx, (W - tw) / 2, 118, tw, 86, 43);
   ctx.fillStyle = team.color;
   ctx.fill();
   ctx.strokeStyle = colors.gold;
@@ -192,32 +209,72 @@ export function renderTeamWinner(team: TeamView): Buffer {
   ctx.stroke();
   ctx.fillStyle = "#fff";
   ctx.font = font(46, 900);
-  rtlText(ctx, team.name, W / 2, 170);
+  rtlText(ctx, team.name, W / 2, 163);
 
-  team.players.forEach((p, i) => {
-    const row = Math.floor(i / perRow);
-    const inRow = Math.min(perRow, n - row * perRow);
-    const col = i % perRow;
-    const rowW = inRow * cellW;
-    // من اليمين لليسار
-    const cx = (W + rowW) / 2 - cellW * col - cellW / 2;
-    const cy = top + row * cellH + r + 10;
+  // نجم الفريق
+  if (mvp) {
+    const cx = W / 2;
+    const cy = top + mvpR + 20;
     ctx.save();
-    ctx.shadowColor = alpha(colors.gold, 0.5);
-    ctx.shadowBlur = 35;
+    ctx.shadowColor = alpha(colors.gold, 0.8);
+    ctx.shadowBlur = 70;
     ctx.beginPath();
-    ctx.arc(cx, cy, r + 8, 0, Math.PI * 2);
+    ctx.arc(cx, cy, mvpR + 12, 0, Math.PI * 2);
     ctx.fillStyle = "#0e0e10";
     ctx.fill();
     ctx.restore();
-    drawAvatar(ctx, p.avatar, cx, cy, r);
-    ring(ctx, cx, cy, r + 5, colors.gold, 9);
+    drawAvatar(ctx, mvp.avatar, cx, cy, mvpR);
+    ring(ctx, cx, cy, mvpR + 8, colors.gold, 14);
+
+    // نجمة ذهبية كبيرة على الإطار
+    const sx = cx + mvpR * 0.72;
+    const sy = cy - mvpR * 0.72;
+    drawStar(ctx, sx, sy, 50, 22);
+    ctx.fillStyle = "#f7c948";
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = "#0e0e10";
+    ctx.stroke();
+
+    // شريط «نجم الفريق»
+    const ribbonW = 300;
+    const ry = cy + mvpR + 22;
+    roundRect(ctx, cx - ribbonW / 2, ry, ribbonW, 54, 27);
+    ctx.fillStyle = colors.gold;
+    ctx.fill();
+    ctx.fillStyle = "#1a1305";
+    ctx.font = font(30, 900);
+    rtlText(ctx, "⭐ نجم الفريق ⭐", cx, ry + 28);
+
     ctx.fillStyle = "#fff";
-    const name = fitName(ctx, safeName(p.name), cellW - 20, 32, 18);
+    const name = fitName(ctx, safeName(mvp.name), W - 200, 46, 24);
     ctx.direction = "inherit";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(name, cx, cy + r + 45);
+    ctx.fillText(name, cx, ry + 100);
+  }
+
+  // باقي الأعضاء
+  const rowsTop = top + mvpBlock + (mvp ? 10 : 0);
+  others.forEach((p, i) => {
+    const row = Math.floor(i / perRow);
+    const inRow = Math.min(perRow, others.length - row * perRow);
+    const col = i % perRow;
+    const rowW = inRow * cellW;
+    const cx = (W + rowW) / 2 - cellW * col - cellW / 2;
+    const cy = rowsTop + row * cellH + r + 10;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = "#0e0e10";
+    ctx.fill();
+    drawAvatar(ctx, p.avatar, cx, cy, r);
+    ring(ctx, cx, cy, r + 4, mvp ? team.color : colors.gold, mvp ? 6 : 9);
+    ctx.fillStyle = "#e6e6ea";
+    const name = fitName(ctx, safeName(p.name), cellW - 20, mvp ? 26 : 32, 16);
+    ctx.direction = "inherit";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(name, cx, cy + r + 38);
   });
 
   ctx.fillStyle = "#6e6e74";

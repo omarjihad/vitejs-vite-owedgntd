@@ -13,6 +13,8 @@ export interface TurnInfo {
   number: number; // رقم اللاعب بالترتيب
   /** بوضع الفرق: اسم ولون فريق اللاعب */
   team?: { name: string; color: string };
+  /** بوضع الفرق: صور كل أعضاء الفريق (تنرسم بدل الصورة الوحدة) */
+  group?: Image[];
 }
 
 function drawCross(ctx: SKRSContext2D, x: number, y: number, s: number) {
@@ -106,19 +108,54 @@ export function renderTurn(info: TurnInfo): Buffer {
   const cx = S / 2;
   const cy = 175;
   const r = 100;
-  ctx.save();
-  ctx.shadowColor = alpha(accent, 0.45);
-  ctx.shadowBlur = 40;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-  ctx.fillStyle = "#1c1c1e";
-  ctx.fill();
-  ctx.restore();
-  drawAvatar(ctx, info.avatar, cx, cy, r);
-  ring(ctx, cx, cy, r + 4, accent, 8);
+  if (info.group && info.group.length > 1) {
+    // صور الفريق متداخلة بصف واحد
+    const max = 6;
+    const shown = info.group.slice(0, max);
+    const extra = info.group.length - shown.length;
+    const gr = shown.length <= 3 ? 80 : 66;
+    const step = gr * 1.45;
+    const count = shown.length + (extra > 0 ? 1 : 0);
+    const startX = cx - ((count - 1) * step) / 2;
+    const ringColor = info.team?.color ?? accent;
+    shown.forEach((img, i) => {
+      const x = startX + i * step;
+      ctx.beginPath();
+      ctx.arc(x, cy, gr + 6, 0, Math.PI * 2);
+      ctx.fillStyle = "#1c1c1e";
+      ctx.fill();
+      drawAvatar(ctx, img, x, cy, gr);
+      ring(ctx, x, cy, gr + 3, ringColor, 5);
+    });
+    if (extra > 0) {
+      const x = startX + shown.length * step;
+      ctx.beginPath();
+      ctx.arc(x, cy, gr, 0, Math.PI * 2);
+      ctx.fillStyle = alpha(ringColor, 0.25);
+      ctx.fill();
+      ring(ctx, x, cy, gr + 3, ringColor, 5);
+      ctx.fillStyle = "#fff";
+      ctx.font = font(40, 900);
+      ctx.direction = "ltr";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`+${extra}`, x, cy + 2);
+    }
+  } else {
+    ctx.save();
+    ctx.shadowColor = alpha(accent, 0.45);
+    ctx.shadowBlur = 40;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#1c1c1e";
+    ctx.fill();
+    ctx.restore();
+    drawAvatar(ctx, info.avatar, cx, cy, r);
+    ring(ctx, cx, cy, r + 4, accent, 8);
+  }
 
-  // الاسم الكامل
-  ctx.fillStyle = "#fff";
+  // الاسم الكامل (أو اسم الفريق بلونه)
+  ctx.fillStyle = info.group && info.team ? info.team.color : "#fff";
   const name = fitName(ctx, safeName(info.name), S - 120, 50, 28);
   ctx.direction = "inherit";
   ctx.textAlign = "center";

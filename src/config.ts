@@ -49,7 +49,11 @@ export const LEVELS = [
   { name: "المستوى الصعب", seconds: 4, color: "#e8493f" },
 ] as const;
 
-export function levelForTurn(turnNumber: number) {
-  const idx = Math.min(LEVELS.length - 1, Math.floor(turnNumber / config.turnsPerLevel));
-  return LEVELS[idx];
+/** وضع الفرق: نفس المستويات + مستوى أخير أسرع (2.3 ثانية) */
+export const TEAM_LEVELS = [...LEVELS, { name: "المستوى الأسطوري", seconds: 2.3, color: "#d946ef" }] as const;
+
+export function levelForTurn(turnNumber: number, team = false) {
+  const list = team ? TEAM_LEVELS : LEVELS;
+  const idx = Math.min(list.length - 1, Math.floor(turnNumber / config.turnsPerLevel));
+  return list[idx];
 }

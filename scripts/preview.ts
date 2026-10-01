@@ -67,9 +67,18 @@ const team = (t: 0 | 1, idx: number[]) => ({
 const t1 = team(0, [0, 2, 4, 6, 8]);
 const t2 = team(1, [1, 3, 5, 7]);
 fs.writeFileSync("preview/teams.png", renderTeams([t1, t2], LEVELS[0].name, LEVELS[0].color));
-fs.writeFileSync("preview/team-winner.png", renderTeamWinner(t2));
+fs.writeFileSync("preview/team-winner.png", renderTeamWinner(t1, 2));
 fs.writeFileSync(
   "preview/turn-team.png",
-  renderTurn({ ...players[1], letter: "ر", seconds: 12, levelName: LEVELS[0].name, accent: LEVELS[0].color, number: 2, team: { name: t2.name, color: t2.color } }),
+  renderTurn({ name: t1.name, avatar: players[0].avatar, group: t1.players.map((p) => p.avatar), letter: "ر", seconds: 2.3, levelName: "المستوى الأسطوري", accent: "#d946ef", number: 0, team: { name: t1.name, color: t1.color } }),
 );
 console.log("✔ preview/teams.png");
+
+const { renderTitles } = await import("../src/render/titles.js");
+const { TITLES } = await import("../src/titles.js");
+const demo = { gamesPlayed: 30, wins: 4, words: 240, fastestMs: 1500, bestWinStreak: 2, longestWordLen: 9, bestWordsInGame: 7, flawlessWins: 1, bigWins: 0 };
+fs.writeFileSync(
+  "preview/titles.png",
+  renderTitles(players[1].name, players[1].avatar, TITLES.map((t) => { const [current, target] = t.progress(demo as any); return { emoji: t.emoji, name: t.name, how: t.how, earned: current >= target, current, target }; })),
+);
+console.log("✔ preview/titles.png");

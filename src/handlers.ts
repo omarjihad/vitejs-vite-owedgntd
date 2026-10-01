@@ -4,7 +4,8 @@ import { config, LEVELS } from "./config.js";
 import { getAvatar } from "./avatar.js";
 import { users, type UserStats } from "./db.js";
 import { renderStats } from "./render/stats.js";
-import { earnedTitles, hasTitle, mainTitle, titleLabel, TITLES } from "./titles.js";
+import { renderTitles } from "./render/titles.js";
+import { earnedTitles, mainTitle, titleLabel, TITLES } from "./titles.js";
 import { cleanWord, isArabicWord, normalizeWord } from "./arabic.js";
 import { activeGames, displayName, escapeHtml, Game, mention } from "./game.js";
 import { inDictionary, isValidWord, setWord } from "./validator.js";
@@ -23,8 +24,9 @@ function helpText(): string {
     "   مثال: رمل ← لؤلؤ ← أسد ...\n" +
     "   (كل أشكال الهمزة تنحسب «أ»، والـ«ة» تنحسب «ه»، والـ«ى» تنحسب «ي»)\n" +
     `6️⃣ الوقت يبدأ ${LEVELS[0].seconds} ثانية، وكل ${config.turnsPerLevel} أسئلة يقل: ${times} ثانية.\n` +
-    "7️⃣ كل لاعب عنده <b>بطاقة تخطي</b> وحدة 🃏: يضغط زر «تخطي» ويعبر دوره للي بعده بنفس الحرف. وإذا خلص وقته وبعده عنده البطاقة تنستخدم تلقائياً.\n" +
-    "8️⃣ الي يخلص وقته وما عنده بطاقة يطلع، وآخر لاعب يضل هو الفائز 🏆\n\n" +
+    "7️⃣ كل لاعب عنده <b>بطاقة تخطي</b> وحدة 🃏: زر «تخطي» الأحمر يعبر دوره للي بعده بنفس الحرف. وإذا خلص وقته وبعده عنده البطاقة تنستخدم تلقائياً.\n" +
+    "8️⃣ الي يخلص وقته وما عنده بطاقة يطلع، وآخر لاعب يضل هو الفائز 🏆\n" +
+    "👥 <b>وضع الفرق:</b> الدور للفريق كله، أي لاعب يكتب كلمة صحيحة تعبر للفريق الثاني. لكل فريق بطاقة تخطي، والفريق الي يخلص وقته بدونها يخسر. وبيه مستوى أخير سرعته 2.3 ثانية!\n\n" +
     "📚 الكلمات تنفحص بقاموس عربي، والكلمة ما تتكرر بنفس الجولة.\n" +
     "👎 = كلمة غلط أو بحرف غلط (تكدر تحاول مرة ثانية ضمن الوقت)\n" +
     "🤔 = الكلمة مستخدمة قبل\n\n" +
@@ -141,26 +143,22 @@ async function sendStats(ctx: Context): Promise<void> {
   await ctx.replyWithPhoto(new InputFile(image, "stats.png"), { caption, parse_mode: "HTML", ...replyTo });
 }
 
-/** قائمة الألقاب: المحصلة والباقية وشلون تحصلها */
-async function titlesText(userId: number, name: string): Promise<string> {
-  const s = (await users.findOne({ _id: userId })) ?? ({} as Partial<UserStats>);
-  const stats = s as UserStats;
-  const earned = TITLES.filter((t) => hasTitle(t, stats));
-  const locked = TITLES.filter((t) => !hasTitle(t, stats));
-  let text = `🏅 <b>ألقاب</b> ${mention({ id: userId, name })} (${earned.length}/${TITLES.length})\n`;
-  text += "\n✅ <b>المحصلة:</b>\n";
-  text += earned.length ? earned.map((t) => `${titleLabel(t)}`).join("\n") : "ولا لقب بعد، العب جولة وابدي 💪";
-  if (locked.length) {
-    text += "\n\n🔒 <b>الباقية:</b>\n";
-    text += locked
-      .map((t) => {
-        const [cur, target] = t.progress(stats);
-        const prog = target > 1 ? ` (${Math.min(cur, target)}/${target})` : "";
-        return `${titleLabel(t)} — ${t.how}${prog}`;
-      })
-      .join("\n");
-  }
-  return text;
+/** صورة الألقاب: المحصلة والباقية وشلون تحصلها */
+async function sendTitles(ctx: Context): Promise<void> {
+  const from = ctx.from!;
+  const name = displayName(from);
+  const stats = ((await users.findOne({ _id: from.id })) ?? {}) as UserStats;
+  const items = TITLES.map((t) => {
+    const [current, target] = t.progress(stats);
+    return { emoji: t.emoji, name: t.name, how: t.how, earned: current >= target, current, target };
+  });
+  const earned = items.filter((t) => t.earned).length;
+  const image = renderTitles(name, await getAvatar(ctx.api, from.id, name), items);
+  await ctx.replyWithPhoto(new InputFile(image, "titles.png"), {
+    caption: `🏅 ألقاب ${mention({ id: from.id, name })}: ${earned} من ${TITLES.length}`,
+    parse_mode: "HTML",
+    reply_parameters: { message_id: ctx.msg!.message_id },
+  });
 }
 
 async function leaderboardText(): Promise<string> {
@@ -203,14 +201,11 @@ export function registerHandlers(bot: Bot) {
     await sendStats(ctx);
   });
 
-  bot.hears(/^(الالقاب|الألقاب|القابي|ألقابي)$/, async (ctx) => {
+  bot.hears(/^(الالقاب|الألقاب|القابي|ألقابي)$/, async (ctx, next) => {
     if (!ctx.from) return;
     const game = ctx.chat && activeGames.get(ctx.chat.id);
-    if (game?.isCurrentPlayer(ctx.from.id)) return; // دوره باللعب، نخليها تنحسب كلمة
-    await ctx.reply(await titlesText(ctx.from.id, displayName(ctx.from)), {
-      parse_mode: "HTML",
-      reply_parameters: { message_id: ctx.msg!.message_id },
-    });
+    if (game?.isCurrentPlayer(ctx.from.id)) return next(); // دوره باللعب، نخليها تنحسب كلمة
+    await sendTitles(ctx);
   });
 
   // ───────── إدارة الكلمات ─────────

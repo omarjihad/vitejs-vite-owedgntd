@@ -43,12 +43,16 @@ export type Mode = "solo" | "team" | "duel";
 export const TEAM_MIN_PLAYERS = 4;
 
 interface Turn {
-  player: Player;
+  /** فردي/تحدي: اللاعب الي دوره */
+  player?: Player;
+  /** فرق: الفريق الي دوره (أي لاعب منه يكدر يجاوب) */
+  team?: 0 | 1;
   letter: string;
   startedAt: number;
   deadline: number;
   timer?: NodeJS.Timeout;
-  checking: boolean;
+  /** عدد الكلمات الي دا تنفحص هسه */
+  pending: number;
   expiredWhileChecking: boolean;
   done: boolean;
 }
@@ -86,6 +90,8 @@ export class Game {
   private startedAt = new Date();
   /** null = صاحب الجولة بعده ما اختار النوع */
   mode: Mode | null = null;
+  /** بوضع الفرق: بطاقة تخطي وحدة لكل فريق */
+  private teamSkip: [boolean, boolean] = [true, true];
 
   constructor(
     private readonly api: Api,
@@ -273,12 +279,12 @@ export class Game {
             (t) =>
               `${TEAM_STYLE[t].emoji} <b>${TEAM_STYLE[t].name}</b>\n` +
               this.order
-                .map((p, i) => (p.team === t ? `${i + 1}. ${mention(p)}` : null))
-                .filter(Boolean)
-                .join("\n"),
+                .filter((p) => p.team === t)
+                .map((p) => mention(p))
+                .join(" | "),
           )
           .join("\n\n") +
-        "\n\n🔗 الأدوار بالتناوب بين الفريقين، والفريق الي يطلعون كل لاعبيه يخسر!";
+        "\n\n🔗 الدور للفريق كله: أي لاعب يكتب كلمة صحيحة تعبر للفريق الثاني.\n🃏 لكل فريق بطاقة تخطي وحدة، والفريق الي يخلص وقته بدون بطاقة يخسر!";
     } else {
       image = renderLineup(
         this.order.map((p) => ({ name: p.name, avatar: p.avatar! })),
@@ -299,7 +305,8 @@ export class Game {
     this.state = "playing";
     await sleep(3000);
     if (this.isOver()) return;
-    await this.beginTurn(this.order[0], randomLetter());
+    if (this.mode === "team") await this.beginTurn({ team: 0 }, randomLetter());
+    else await this.beginTurn({ player: this.order[0] }, randomLetter());
   }
 
   private teamViews(alive = false): [TeamView, TeamView] {
@@ -307,9 +314,8 @@ export class Game {
       name: TEAM_STYLE[t].name,
       color: TEAM_STYLE[t].color,
       players: this.order
-        .map((p, i) => ({ p, number: i + 1 }))
-        .filter(({ p }) => p.team === t && (!alive || p.alive))
-        .map(({ p, number }) => ({ name: p.name, avatar: p.avatar!, number })),
+        .filter((p) => p.team === t && (!alive || p.alive))
+        .map((p, i) => ({ name: p.name, avatar: p.avatar!, number: i + 1 })),
     })) as [TeamView, TeamView];
   }
 
@@ -325,13 +331,6 @@ export class Game {
 
   private nextAliveAfter(player: Player): Player {
     const idx = this.order.indexOf(player);
-    if (this.mode === "team") {
-      // الدور يروح للفريق الثاني إذا بيه أحد باقي
-      for (let step = 1; step <= this.order.length; step++) {
-        const p = this.order[(idx + step) % this.order.length];
-        if (p.alive && p.team !== player.team) return p;
-      }
-    }
     for (let step = 1; step <= this.order.length; step++) {
       const p = this.order[(idx + step) % this.order.length];
       if (p.alive) return p;
@@ -339,39 +338,52 @@ export class Game {
     return player;
   }
 
-  private async beginTurn(player: Player, letter: string): Promise<void> {
+  private teamMembers(team: 0 | 1): Player[] {
+    return this.order.filter((p) => p.team === team);
+  }
+
+  private async beginTurn(subject: { player?: Player; team?: 0 | 1 }, letter: string): Promise<void> {
     if (this.isOver()) return;
-    const level = levelForTurn(this.turnNumber);
+    const level = levelForTurn(this.turnNumber, this.mode === "team");
     const shown = displayLetter(letter);
-    const image = renderTurn({
-      name: player.name,
-      avatar: player.avatar!,
-      letter: shown,
-      seconds: level.seconds,
-      levelName: level.name,
-      accent: level.color,
-      number: this.order.indexOf(player) + 1,
-      team: player.team !== undefined ? { name: TEAM_STYLE[player.team].name, color: TEAM_STYLE[player.team].color } : undefined,
-    });
+    const { player, team } = subject;
+    const style = team !== undefined ? TEAM_STYLE[team] : null;
+
+    const image = renderTurn(
+      style && team !== undefined
+        ? {
+            name: style.name,
+            avatar: this.teamMembers(team)[0].avatar!,
+            group: this.teamMembers(team).map((p) => p.avatar!),
+            letter: shown,
+            seconds: level.seconds,
+            levelName: level.name,
+            accent: level.color,
+            number: 0,
+            team: { name: style.name, color: style.color },
+          }
+        : {
+            name: player!.name,
+            avatar: player!.avatar!,
+            letter: shown,
+            seconds: level.seconds,
+            levelName: level.name,
+            accent: level.color,
+            number: this.order.indexOf(player!) + 1,
+          },
+    );
 
     const header = this.notes.length ? this.notes.join("\n") + "\n\n" : "";
     this.notes = [];
-    const caption =
-      header +
-      `🎯 دورك يا ${mention(player)}` +
-      (player.team !== undefined ? ` (${TEAM_STYLE[player.team].emoji} ${TEAM_STYLE[player.team].name})` : "") +
-      "\n" +
-      `🔤 اكتب كلمة تبدأ بحرف « <b>${shown}</b> »\n` +
-      `⏱ عندك ${level.seconds} ثانية — ${level.name}\n` +
-      (player.skipCard
-        ? "🃏 عندك بطاقة تخطي وحدة (إذا خلص الوقت تنستخدم تلقائياً)"
-        : "⚠️ ما عندك بطاقة تخطي، إذا خلص الوقت تطلع");
+    const who = style ? `${style.emoji} <b>${style.name}</b>` : mention(player!);
+    const caption = header + `🎯 ${who} • « <b>${shown}</b> » • ⏱ ${level.seconds} ث`;
+    const hasCard = team !== undefined ? this.teamSkip[team] : player!.skipCard;
 
     try {
       await this.api.sendPhoto(this.chatId, new InputFile(image, "turn.png"), {
         caption,
         parse_mode: "HTML",
-        reply_markup: player.skipCard ? new InlineKeyboard().text("🃏 تخطي", "g:skip") : undefined,
+        reply_markup: hasCard ? new InlineKeyboard().text("🃏 تخطي", "g:skip").danger() : undefined,
       });
     } catch (err) {
       console.error("[Game] فشل إرسال الدور:", err);
@@ -381,10 +393,11 @@ export class Game {
     const startedAt = Date.now();
     const turn: Turn = {
       player,
+      team,
       letter,
       startedAt,
       deadline: startedAt + level.seconds * 1000 + config.graceMs,
-      checking: false,
+      pending: 0,
       expiredWhileChecking: false,
       done: false,
     };
@@ -392,17 +405,21 @@ export class Game {
     this.turn = turn;
   }
 
-  /** هل هذا اللاعب دوره هسه؟ (رسائله تنحسب كلمات مو أوامر) */
+  /** هل هذا اللاعب يكدر يجاوب هسه؟ (رسائله تنحسب كلمات مو أوامر) */
   isCurrentPlayer(userId: number): boolean {
-    return this.state === "playing" && !!this.turn && !this.turn.done && this.turn.player.id === userId;
+    const turn = this.turn;
+    if (this.state !== "playing" || !turn || turn.done) return false;
+    if (turn.team !== undefined) return this.players.get(userId)?.team === turn.team;
+    return turn.player?.id === userId;
   }
 
   /** يستقبل رسائل المجموعة أثناء اللعب */
   async handleMessage(userId: number, messageId: number, text: string): Promise<void> {
     const turn = this.turn;
-    if (this.state !== "playing" || !turn || turn.done || turn.player.id !== userId) return;
+    if (!turn || !this.isCurrentPlayer(userId)) return;
+    const p = this.players.get(userId)!;
     const receivedAt = Date.now();
-    if (receivedAt > turn.deadline || turn.checking) return;
+    if (receivedAt > turn.deadline) return;
 
     const word = cleanWord(text);
     if (!word || /\s/.test(word) || !isArabicWord(word)) return; // مو كلمة عربية، نتجاهلها
@@ -417,7 +434,7 @@ export class Game {
       return;
     }
 
-    turn.checking = true;
+    turn.pending++;
     let valid: boolean;
     try {
       valid = await isValidWord(key, word);
@@ -425,21 +442,20 @@ export class Game {
       console.error("[Game] فشل فحص الكلمة:", err);
       valid = config.aiFailOpen;
     } finally {
-      turn.checking = false;
+      turn.pending--;
     }
     if (turn.done || this.isOver() || this.turn !== turn) return;
 
     if (!valid) {
       await this.react(messageId, "👎");
-      if (turn.expiredWhileChecking || Date.now() > turn.deadline) await this.expire(turn);
+      if (turn.pending === 0 && (turn.expiredWhileChecking || Date.now() > turn.deadline)) await this.expire(turn);
       return;
     }
 
-    // ✅ كلمة صحيحة
+    // ✅ كلمة صحيحة (بالفرق: أول واحد يكتب كلمة صحيحة تنحسبله)
     turn.done = true;
     clearTimeout(turn.timer);
     const ms = receivedAt - turn.startedAt;
-    const p = turn.player;
     p.words++;
     p.totalMs += ms;
     p.fastestMs = p.fastestMs === null ? ms : Math.min(p.fastestMs, ms);
@@ -450,76 +466,98 @@ export class Game {
     void this.react(messageId, ms < 3000 ? "⚡" : "👍");
 
     this.notes.push(`✅ ${escapeHtml(p.name)}: <b>${escapeHtml(word)}</b> (${(ms / 1000).toFixed(1)} ث)`);
-    await this.beginTurn(this.nextAliveAfter(p), lastLetter(key));
+    const next = turn.team !== undefined ? { team: (1 - turn.team) as 0 | 1 } : { player: this.nextAliveAfter(p) };
+    await this.beginTurn(next, lastLetter(key));
   }
 
   private onTimeout(turn: Turn) {
     if (turn.done || this.turn !== turn || this.isOver()) return;
-    if (turn.checking) {
-      // اللاعب كتب قبل انتهاء الوقت والكلمة بعدها تنفحص؛ ننتظر النتيجة
+    if (turn.pending > 0) {
+      // في كلمة انكتبت قبل انتهاء الوقت وبعدها تنفحص؛ ننتظر النتيجة
       turn.expiredWhileChecking = true;
       return;
     }
     void this.expire(turn).catch((e) => console.error("[Game] خطأ بانتهاء الوقت:", e));
   }
 
-  /** انتهى الوقت: إذا عنده بطاقة تخطي تنستخدم تلقائياً، وإلا يطلع */
+  /** انتهى الوقت: إذا عنده بطاقة تخطي تنستخدم تلقائياً، وإلا يطلع (أو يخسر الفريق) */
   private async expire(turn: Turn): Promise<void> {
-    if (turn.player.skipCard) await this.skip(turn, true);
+    if (turn.team !== undefined) {
+      if (this.teamSkip[turn.team]) await this.skip(turn, true);
+      else await this.teamLose(turn);
+      return;
+    }
+    if (turn.player!.skipCard) await this.skip(turn, true);
     else await this.eliminate(turn);
   }
 
-  /** اللاعب ضغط زر التخطي */
+  /** ضغط زر التخطي */
   async useSkip(userId: number): Promise<string | null> {
     const turn = this.turn;
     if (this.state !== "playing" || !turn || turn.done) return "ماكو دور شغال هسه";
-    if (turn.player.id !== userId) return "مو دورك ✋";
-    if (!turn.player.skipCard) return "استخدمت بطاقتك من قبل 🃏";
-    if (turn.checking) return "انتظر، كلمتك دا تنفحص ⏳";
-    await this.skip(turn, false);
+    if (!this.isCurrentPlayer(userId)) return "مو دورك ✋";
+    const hasCard = turn.team !== undefined ? this.teamSkip[turn.team] : turn.player!.skipCard;
+    if (!hasCard) return "البطاقة مستخدمة 🃏";
+    if (turn.pending > 0) return "انتظر، في كلمة دا تنفحص ⏳";
+    await this.skip(turn, false, this.players.get(userId));
     return null;
   }
 
-  private async skip(turn: Turn, auto: boolean): Promise<void> {
+  private async skip(turn: Turn, auto: boolean, by?: Player): Promise<void> {
     if (turn.done) return;
     turn.done = true;
     clearTimeout(turn.timer);
-    const p = turn.player;
+    this.turnNumber++;
+
+    if (turn.team !== undefined) {
+      const style = TEAM_STYLE[turn.team];
+      this.teamSkip[turn.team] = false;
+      if (by) by.skipsUsed++;
+      this.notes.push(auto ? `⏰ ${style.emoji} تخطي تلقائي 🃏` : `🃏 ${mention(by!)} تخطى عن ${style.emoji}`);
+      // نفس الحرف ينتقل للفريق الثاني
+      await this.beginTurn({ team: (1 - turn.team) as 0 | 1 }, turn.letter);
+      return;
+    }
+
+    const p = turn.player!;
     p.skipCard = false;
     p.skipsUsed++;
-    this.turnNumber++;
-    this.notes.push(
-      auto
-        ? `⏰ خلص وقت ${mention(p)} — انستخدمت بطاقة التخطي تلقائياً 🃏`
-        : `🃏 ${mention(p)} استخدم بطاقة التخطي`,
-    );
+    this.notes.push(auto ? `⏰ ${mention(p)}: تخطي تلقائي 🃏` : `🃏 ${mention(p)} تخطى`);
     // نفس الحرف ينتقل للاعب الي بعده
-    await this.beginTurn(this.nextAliveAfter(p), turn.letter);
+    await this.beginTurn({ player: this.nextAliveAfter(p) }, turn.letter);
   }
 
   private async eliminate(turn: Turn): Promise<void> {
     if (turn.done) return;
     turn.done = true;
     clearTimeout(turn.timer);
-    const p = turn.player;
+    const p = turn.player!;
     p.alive = false;
     p.eliminated = true;
     this.turnNumber++;
-    this.notes.push(`⏰ انتهى الوقت! تم إقصاء ${mention(p)}`);
+    this.notes.push(`❌ طلع ${mention(p)}`);
 
     const alive = this.alivePlayers();
-    if (this.mode === "team") {
-      const left = new Set(alive.map((x) => x.team));
-      if (left.size <= 1) {
-        const team = alive[0]?.team;
-        await this.finish(team === undefined ? [] : this.order.filter((x) => x.team === team), team);
-        return;
-      }
-    } else if (alive.length <= 1) {
+    if (alive.length <= 1) {
       await this.finish(alive[0] ? [alive[0]] : []);
       return;
     }
-    await this.beginTurn(this.nextAliveAfter(p), randomLetter());
+    await this.beginTurn({ player: this.nextAliveAfter(p) }, randomLetter());
+  }
+
+  /** بالفرق: خلص الوقت والبطاقة مستخدمة، فالفريق يخسر */
+  private async teamLose(turn: Turn): Promise<void> {
+    if (turn.done) return;
+    turn.done = true;
+    clearTimeout(turn.timer);
+    const loser = turn.team!;
+    const winner = (1 - loser) as 0 | 1;
+    for (const p of this.teamMembers(loser)) {
+      p.alive = false;
+      p.eliminated = true;
+    }
+    this.notes.push(`❌ خلص وقت ${TEAM_STYLE[loser].emoji} ${TEAM_STYLE[loser].name}`);
+    await this.finish(this.teamMembers(winner), winner);
   }
 
   // ───────────── النهاية ─────────────
@@ -535,7 +573,7 @@ export class Game {
     if (team !== undefined && winners.length) {
       const style = TEAM_STYLE[team];
       const words = winners.reduce((a, p) => a + p.words, 0);
-      const mvp = [...winners].sort((a, b) => b.words - a.words)[0];
+      const mvp = [...winners].sort((a, b) => b.words - a.words || a.totalMs - b.totalMs)[0];
       const caption =
         notes +
         `🏆 <b>فاز ${style.emoji} ${style.name}!</b>\n\n` +
@@ -543,7 +581,7 @@ export class Game {
         `\n\n✍️ كلمات الفريق: ${words}\n` +
         (mvp.words ? `⭐ نجم الفريق: ${mention(mvp)}\n` : "") +
         `🔢 مجموع الكلمات بالجولة: ${this.log.length}`;
-      const image = renderTeamWinner(this.teamViews()[team]);
+      const image = renderTeamWinner(this.teamViews()[team], mvp.words ? this.teamMembers(team).indexOf(mvp) : -1);
       await this.api
         .sendPhoto(this.chatId, new InputFile(image, "team-winner.png"), { caption, parse_mode: "HTML" })
         .catch((e) => console.error("[Game] فشل إرسال صورة الفريق الفائز:", e));

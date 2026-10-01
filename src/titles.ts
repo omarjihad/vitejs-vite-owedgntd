@@ -49,7 +49,7 @@ export const TITLES: Title[] = [
     id: "machine",
     emoji: "🎯",
     name: "الماكينة",
-    how: "اكتب 10 كلمات صحيحة بجولة وحدة",
+    how: "اكتب 10 كلمات بجولة وحدة",
     progress: (s) => [n(s.bestWordsInGame), 10],
   },
   {
